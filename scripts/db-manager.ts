@@ -71,9 +71,13 @@ function runCli() {
           tablesExported: [
             'users',
             'registered_applications',
+            'user_app_roles',
             'device_tokens',
             'notification_preferences',
             'notification_campaigns',
+            'notification_deliveries',
+            'audit_logs',
+            'security_events',
             'system_configs',
           ],
         },
@@ -108,10 +112,15 @@ function runCli() {
       JSON.stringify(
         {
           action: 'restore',
-          status: 'RESTORE_VERIFIED',
+          // HONEST STATUS: this command validates the backup file only.
+          // It does NOT execute the SQL against a live database because the
+          // backend does not bundle a PostgreSQL client yet. Actual restore:
+          // docker compose exec -T postgres psql -U gogo_app_user -d gogo_central < backups/gogo_central_latest.sql
+          status: 'RESTORE_FILE_VALIDATED',
           file: path.relative(process.cwd(), targetFile),
           transactionalSafety: 'BEGIN ... COMMIT verified',
           upsertStatementsVerified: statementCount,
+          note: 'File integrity verified only. SQL was NOT executed against a database. Run manually via psql.',
         },
         null,
         2

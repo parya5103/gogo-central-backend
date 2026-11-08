@@ -6,8 +6,10 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 # Install build dependencies
+# NOTE: this repository ships bun.lock (no package-lock.json), so `npm ci` is
+# not possible. `npm install` resolves versions from package.json ranges.
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm install --no-audit --no-fund
 
 # Copy application source and build frontend assets + verify TypeScript strict mode
 COPY . .

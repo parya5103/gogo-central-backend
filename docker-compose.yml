@@ -30,7 +30,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NODE_ENV: development
+      # Production mode: sandbox role headers are always rejected here, and the
+      # diagnostic self-test endpoint is disabled.
+      NODE_ENV: production
       PORT: 3000
       PG_PROVIDER: local
       SQL_HOST: postgres
@@ -39,6 +41,13 @@ services:
       SQL_USER: gogo_app_user
       SQL_PASSWORD: local_dev_only_password_change_in_prod
       CORS_ALLOWED_ORIGINS: "https://gogocompany.in,http://localhost:3000"
+      # Explicit defense-in-depth: sandbox auth headers stay disabled even in
+      # local containers. Set to "true" only for manual sandbox-header testing.
+      GOGO_ENABLE_SANDBOX_AUTH: "false"
+      # FCM_DRY_RUN=true validates FCM requests without delivering pushes.
+      # Requires valid Firebase credentials either way; set to "false" once
+      # real delivery is intended and credentials are configured.
+      FCM_DRY_RUN: "true"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/v1/health"]
       interval: 15s
