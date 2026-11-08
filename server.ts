@@ -14,8 +14,14 @@ import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
-import { adminAuth, ROOT_ADMIN_EMAIL, FIREBASE_PROJECT_ID } from './src/lib/firebase-admin.ts';
+import { verifyFirebaseIdToken, ROOT_ADMIN_EMAIL, FIREBASE_PROJECT_ID } from './src/lib/firebase-admin.ts';
 import { backendStore } from './src/server/store.ts';
+import {
+  resolveDataStore,
+  type GoGoDataStore,
+} from './src/server/data-store.ts';
+import { PostgresRateLimitStore } from './src/server/rate-limit-pg.ts';
+import { mapFirebaseSignInProvider } from './src/server/auth-provider.ts';
 import {
   resolvePostgresConfig,
   verifyPostgresMigrationFile,
@@ -25,6 +31,20 @@ import {
 
 const PORT = Number(process.env.PORT) || 3000;
 const startTime = Date.now();
+
+/**
+ * Active persistence store (in-memory test adapter or PostgreSQL runtime).
+ * Set by createGoGoApp(); module-level middleware reads it. Exactly one store
+ * is active per process, mirroring the previous engine-singleton design.
+ */
+let activeStore: GoGoDataStore | null = null;
+
+function store(): GoGoDataStore {
+  if (!activeStore) {
+    throw new Error('STORE_NOT_INITIALIZED: createGoGoApp() must run first.');
+  }
+  return activeStore;
+}
 
 export interface AuthenticatedRequest extends Request {
   user?: {
@@ -36,17 +56,22 @@ export interface AuthenticatedRequest extends Request {
   };
 }
 
-// Strict GoGo Ecosystem CORS Allowlist
-const ALLOWED_GOGO_ORIGINS = new Set([
+// Strict GoGo Ecosystem CORS Allowlist.
+// Base allowlist covers the apex + www GoGo domain and local development.
+// CORS_ALLOWED_ORIGINS (comma-separated HTTPS origins) extends the allowlist at
+// runtime so new origins are added via environment configuration, not code.
+const ALLOWED_GOGO_ORIGINS = new Set<string>([
   'https://gogocompany.in',
   'https://www.gogocompany.in',
-  'https://sarkarisaathi.com',
-  'https://pikanews.gogocompany.in',
-  'https://arrowout.gogocompany.in',
-  'https://crystalquest.gogocompany.in',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
 ]);
+for (const extraOrigin of (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean)) {
+  ALLOWED_GOGO_ORIGINS.add(extraOrigin);
+}
 
 /**
  * Extracts the true client IP behind Google Cloud Run / Reverse Proxy without trusting
@@ -104,12 +129,39 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
     }
 
     try {
-      // checkRevoked = true ensures revoked refresh sessions are immediately rejected
-      const decoded = await adminAuth.verifyIdToken(idToken, true);
+      // checkRevoked = true ensures revoked refresh sessions are immediately rejected.
+      // Delegates to the real adminAuth.verifyIdToken in production; the
+      // GOGO_TEST_IMPORT-guarded seam only substitutes fakes in test runners.
+      const decoded = await verifyFirebaseIdToken(idToken, true);
       const email = decoded.email || '';
+      // Admin role comes from trusted server-side records only: the verified
+      // root-admin email bootstrap or a server-side admin role row. Clients
+      // can never assert a role.
       const isAdmin =
         (email === ROOT_ADMIN_EMAIL && decoded.email_verified === true) ||
-        backendStore.admins.has(decoded.uid);
+        (await store().isAdminUid(decoded.uid));
+
+      // Provider is read from the VERIFIED token's own claim
+      // (decoded.firebase.sign_in_provider) — never hardcoded, never
+      // client-supplied. Unsupported providers are rejected (fail closed).
+      const authProvider = mapFirebaseSignInProvider(decoded);
+      if (!authProvider) {
+        const rawProvider =
+          (decoded as { firebase?: { sign_in_provider?: string } }).firebase
+            ?.sign_in_provider ?? 'missing';
+        await store().recordSecurityEvent(
+          'UNVERIFIED_TOKEN_BLOCKED',
+          String(req.headers['x-gogo-app-id'] || 'central-control'),
+          `${req.method} ${req.originalUrl}`,
+          'high',
+          `Rejected verified token with unsupported sign-in provider (${rawProvider.slice(0, 32)}).`,
+          extractTrustedClientIp(req)
+        );
+        return res.status(401).json({
+          error: 'Unauthorized: Firebase sign-in provider is not supported by GoGo Central.',
+          code: 'AUTH_PROVIDER_NOT_SUPPORTED',
+        });
+      }
 
       req.user = {
         uid: decoded.uid,
@@ -119,23 +171,17 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         authMode: 'firebase-id-token',
       };
 
-      if (!backendStore.users.has(decoded.uid)) {
-        const now = new Date().toISOString();
-        backendStore.users.set(decoded.uid, {
-          uid: decoded.uid,
-          displayName: decoded.name || email.split('@')[0] || 'GoGo User',
-          emailMasked: email
-            ? `${email.slice(0, 2)}***@${email.split('@')[1] || 'gogo.in'}`
-            : 'verified@gogo.in',
-          role: isAdmin ? 'admin' : 'user',
-          emailVerified: Boolean(decoded.email_verified),
-          connectedApps: ['gogocompany-in'],
-          authProvider: 'google.com',
-          firestoreGameSavePreserved: true,
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
+      // Sync the verified Firebase user into the persistent store (uid is the
+      // canonical identifier; role is never taken from the client).
+      await store().syncUser(decoded.uid, {
+        displayName: decoded.name || email.split('@')[0] || 'GoGo User',
+        emailMasked: email
+          ? `${email.slice(0, 2)}***@${email.split('@')[1] || 'gogo.in'}`
+          : 'verified@gogo.in',
+        emailVerified: Boolean(decoded.email_verified),
+        authProvider,
+        role: isAdmin ? 'admin' : 'user',
+      });
 
       return next();
     } catch (error: unknown) {
@@ -144,12 +190,13 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
           ? String((error as { code?: string }).code)
           : 'auth/invalid-id-token';
 
-      backendStore.recordSecurityEvent(
+      await store().recordSecurityEvent(
         'UNVERIFIED_TOKEN_BLOCKED',
         String(req.headers['x-gogo-app-id'] || 'central-control'),
         `${req.method} ${req.originalUrl}`,
         'high',
-        `Rejected Firebase Bearer token (${errCode}) via adminAuth.verifyIdToken(token, true).`
+        `Rejected Firebase Bearer token (${errCode}) via adminAuth.verifyIdToken(token, true).`,
+        extractTrustedClientIp(req)
       );
       return res.status(401).json({
         error:
@@ -161,16 +208,18 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
     }
   }
 
-  // Sandbox Role Header: Strictly forbidden in production
+  // Sandbox Role Header: forbidden in production and by default everywhere.
+  // Opt-in only for local testing via GOGO_ENABLE_SANDBOX_AUTH=true.
   const sandboxRole = req.headers['x-gogo-sandbox-role'];
   if (sandboxRole) {
     if (isProductionMode(req)) {
-      backendStore.recordSecurityEvent(
+      await store().recordSecurityEvent(
         'RBAC_VIOLATION',
         String(req.headers['x-gogo-app-id'] || 'central-control'),
         `${req.method} ${req.originalUrl}`,
         'critical',
-        'Blocked attempt to use X-GoGo-Sandbox-Role header in production mode.'
+        'Blocked attempt to use X-GoGo-Sandbox-Role header in production mode.',
+        extractTrustedClientIp(req)
       );
       return res.status(401).json({
         error: 'Unauthorized: Sandbox authentication headers are disabled in production.',
@@ -178,25 +227,55 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
       });
     }
 
+    if (process.env.GOGO_ENABLE_SANDBOX_AUTH !== 'true') {
+      await store().recordSecurityEvent(
+        'UNVERIFIED_TOKEN_BLOCKED',
+        String(req.headers['x-gogo-app-id'] || 'central-control'),
+        `${req.method} ${req.originalUrl}`,
+        'high',
+        'Blocked X-GoGo-Sandbox-Role header: GOGO_ENABLE_SANDBOX_AUTH is not enabled.',
+        extractTrustedClientIp(req)
+      );
+      return res.status(401).json({
+        error: 'Unauthorized: Sandbox authentication headers are disabled.',
+        code: 'AUTH_SANDBOX_DISABLED',
+      });
+    }
+
     if (sandboxRole === 'admin' || sandboxRole === 'user') {
       const isSandboxAdmin = sandboxRole === 'admin';
+      const sandboxUid = isSandboxAdmin ? 'uid_admin_root' : 'uid_sarkari_aspirant_01';
       req.user = {
-        uid: isSandboxAdmin ? 'uid_admin_root' : 'uid_sarkari_aspirant_01',
+        uid: sandboxUid,
         email: isSandboxAdmin ? ROOT_ADMIN_EMAIL : 'rohan@example.com',
         emailVerified: true,
         role: isSandboxAdmin ? 'admin' : 'user',
         authMode: 'verified-sandbox-session',
       };
+      // Keep the persistent store consistent in sandbox mode (test/demo only,
+      // never production). Role stays the server-side sandbox decision.
+      try {
+        await store().syncUser(sandboxUid, {
+          displayName: isSandboxAdmin ? 'GoGo Root Admin' : 'Sarkari Aspirant',
+          emailMasked: isSandboxAdmin ? 'aa***@gm***.com' : 'ro***@ex***.com',
+          emailVerified: true,
+          authProvider: 'google.com',
+          role: isSandboxAdmin ? 'admin' : 'user',
+        });
+      } catch {
+        // Sandbox auth must not hard-fail when the optional store write fails.
+      }
       return next();
     }
   }
 
-  backendStore.recordSecurityEvent(
+  await store().recordSecurityEvent(
     'UNVERIFIED_TOKEN_BLOCKED',
     String(req.headers['x-gogo-app-id'] || 'central-control'),
     `${req.method} ${req.originalUrl}`,
     'medium',
-    'Blocked request missing Authorization Bearer header.'
+    'Blocked request missing Authorization Bearer header.',
+    extractTrustedClientIp(req)
   );
   return res.status(401).json({
     error: 'Unauthorized: Missing Authorization Bearer Firebase ID Token.',
@@ -207,14 +286,15 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
 /**
  * Server-Side Admin Role Authorization Middleware
  */
-function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+async function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   if (!req.user || req.user.role !== 'admin') {
-    backendStore.recordSecurityEvent(
+    await store().recordSecurityEvent(
       'RBAC_VIOLATION',
       String(req.headers['x-gogo-app-id'] || 'central-control'),
       `${req.method} ${req.originalUrl}`,
       'high',
-      `Blocked non-admin UID (${req.user?.uid || 'anonymous'}) from invoking admin endpoint.`
+      `Blocked non-admin UID (${req.user?.uid || 'anonymous'}) from invoking admin endpoint.`,
+      extractTrustedClientIp(req)
     );
     return res.status(403).json({
       error: 'Forbidden: Server-side admin role verification failed.',
@@ -291,6 +371,10 @@ const SendNotificationSchema = z
   .strict();
 
 export async function createGoGoApp() {
+  // Resolve persistence BEFORE wiring middleware: the store is process-global
+  // for the request handlers. Startup fails loudly here if PostgreSQL is
+  // required and unreachable (no silent in-memory fallback).
+  activeStore = await resolveDataStore();
   const app = express();
 
   // Trust exactly 1 reverse proxy hop (Google Cloud Run GFE load balancer).
@@ -308,47 +392,63 @@ export async function createGoGoApp() {
   );
 
   // 2. Strict CORS Policy for GoGo Domains + Cloud Run Preview
+  // Uses the cors options-delegate form (req is available) so rejected origins
+  // are logged as security events with the trusted client IP.
   app.use(
-    cors({
-      origin: (origin, callback) => {
-        if (!origin) {
-          return callback(null, true);
-        }
-        try {
-          const parsedOrigin = new URL(origin);
-          const isAllowedPreview =
-            process.env.NODE_ENV !== 'production' && parsedOrigin.hostname.endsWith('.run.app');
-          const isAllowedGoGoSubdomain =
-            parsedOrigin.protocol === 'https:' &&
-            parsedOrigin.hostname.endsWith('.gogocompany.in');
+    cors((req, callback) => {
+      const origin = req.headers.origin;
+      if (!origin) {
+        // Same-origin / non-browser tools: no CORS headers needed.
+        return callback(null, { origin: false, credentials: true });
+      }
 
-          if (
-            ALLOWED_GOGO_ORIGINS.has(origin) ||
-            isAllowedGoGoSubdomain ||
-            isAllowedPreview
-          ) {
-            return callback(null, true);
-          }
-        } catch {
-          // Invalid origin URL falls through to rejection
-        }
+      let allowed = false;
+      try {
+        const parsedOrigin = new URL(origin);
+        const isAllowedPreview =
+          process.env.NODE_ENV !== 'production' && parsedOrigin.hostname.endsWith('.run.app');
+        const isAllowedGoGoSubdomain =
+          parsedOrigin.protocol === 'https:' &&
+          parsedOrigin.hostname.endsWith('.gogocompany.in');
 
-        backendStore.recordSecurityEvent(
-          'CORS_ORIGIN_REJECTED',
-          'central-control',
-          'CORS Preflight',
-          'medium',
-          `Blocked unauthorized cross-origin request from ${origin}`
-        );
-        return callback(new Error('Not allowed by GoGo Central Backend CORS policy'));
-      },
-      credentials: true,
+        allowed =
+          ALLOWED_GOGO_ORIGINS.has(origin) || isAllowedGoGoSubdomain || isAllowedPreview;
+      } catch {
+        // Invalid origin URL falls through to rejection
+        allowed = false;
+      }
+
+      if (!allowed) {
+        store()
+          .recordSecurityEvent(
+            'CORS_ORIGIN_REJECTED',
+            'central-control',
+            'CORS Preflight',
+            'medium',
+            `Blocked unauthorized cross-origin request from ${origin}`,
+            extractTrustedClientIp(req as unknown as Request)
+          )
+          .catch(() => {
+            // Telemetry failures must not break CORS rejection.
+          });
+      }
+      return callback(null, { origin: allowed, credentials: true });
     })
   );
 
   app.use(express.json({ limit: '50kb' }));
 
   // 3. Hardened Rate Limiters with Custom Anti-Spoofing KeyGenerator & Active Validations
+  // PostgreSQL mode uses shared, atomic bucket stores so limits hold across
+  // all Cloud Run instances (no per-instance MemoryStore multiplication).
+  // Each limiter gets its OWN store instance with a unique key prefix:
+  // express-rate-limit forbids sharing one store across limiters
+  // (ERR_ERL_STORE_REUSE), and distinct prefixes keep the 180/min and 30/min
+  // counters independent.
+  const standardLimitStore =
+    activeStore.mode === 'postgres' ? new PostgresRateLimitStore(60 * 1000, 'std') : undefined;
+  const sensitiveLimitStore =
+    activeStore.mode === 'postgres' ? new PostgresRateLimitStore(60 * 1000, 'sens') : undefined;
   const standardApiLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 180,
@@ -358,14 +458,20 @@ export async function createGoGoApp() {
     validate: {
       default: true,
     },
+        ...(standardLimitStore ? { store: standardLimitStore as never } : {}),
     handler: (req: Request, res: Response) => {
-      backendStore.recordSecurityEvent(
-        'RATE_LIMIT_EXCEEDED',
-        String(req.headers['x-gogo-app-id'] || 'central-control'),
-        `${req.method} ${req.originalUrl}`,
-        'medium',
-        'Rate limit exceeded on standard API route (180 req/min).'
-      );
+      store()
+        .recordSecurityEvent(
+          'RATE_LIMIT_EXCEEDED',
+          String(req.headers['x-gogo-app-id'] || 'central-control'),
+          `${req.method} ${req.originalUrl}`,
+          'medium',
+          'Rate limit exceeded on standard API route (180 req/min).',
+          extractTrustedClientIp(req)
+        )
+        .catch(() => {
+          // Telemetry failures must not break the 429 response.
+        });
       res.status(429).json({
         error: 'Too many requests. Please try again in 60 seconds.',
         code: 'RATE_LIMIT_EXCEEDED',
@@ -382,14 +488,20 @@ export async function createGoGoApp() {
     validate: {
       default: true,
     },
+        ...(sensitiveLimitStore ? { store: sensitiveLimitStore as never } : {}),
     handler: (req: Request, res: Response) => {
-      backendStore.recordSecurityEvent(
-        'RATE_LIMIT_EXCEEDED',
-        String(req.headers['x-gogo-app-id'] || 'central-control'),
-        `${req.method} ${req.originalUrl}`,
-        'high',
-        'Rate limit exceeded on sensitive mutation route (30 req/min).'
-      );
+      store()
+        .recordSecurityEvent(
+          'RATE_LIMIT_EXCEEDED',
+          String(req.headers['x-gogo-app-id'] || 'central-control'),
+          `${req.method} ${req.originalUrl}`,
+          'high',
+          'Rate limit exceeded on sensitive mutation route (30 req/min).',
+          extractTrustedClientIp(req)
+        )
+        .catch(() => {
+          // Telemetry failures must not break the 429 response.
+        });
       res.status(429).json({
         error: 'Rate limit exceeded for sensitive operation. Please wait 60 seconds.',
         code: 'SENSITIVE_RATE_LIMIT_EXCEEDED',
@@ -397,7 +509,23 @@ export async function createGoGoApp() {
     },
   });
 
-  app.use('/api/', standardApiLimiter);
+  // Infrastructure liveness/readiness probes are exempt from rate limiting.
+  // The limiter's store is PostgreSQL-backed in production; if the probes were
+  // rate-limited, a database outage would fail the limiter's increment and
+  // 500 even the process-only /health/live probe (found by the deterministic
+  // compose outage test; restart-storm risk on Kubernetes/Cloud Run). Probe
+  // routes answer directly; ALL other /api/* routes stay rate-limited
+  // (REG-18 verifies the 429 limiter still fires on non-probe routes).
+  app.use('/api/', (req: Request, res: Response, next: NextFunction) => {
+    if (
+      req.path === '/v1/health' ||
+      req.path === '/v1/health/live' ||
+      req.path === '/v1/health/ready'
+    ) {
+      return next();
+    }
+    return standardApiLimiter(req, res, next);
+  });
 
   // ============================================================================
   // Versioned REST API Routes (/api/v1)
@@ -411,66 +539,85 @@ export async function createGoGoApp() {
     });
   });
 
+  // Kubernetes/Cloud Run Liveness Probe: process-only. A temporary database
+  // outage must NOT kill the instance (that would cause restart storms).
+  app.get('/api/v1/health/live', (_req: Request, res: Response) => {
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Readiness Probe: verifies real PostgreSQL connectivity in postgres mode.
+  // Returns 503 while the database is unreachable so load balancers stop
+  // routing requests to this instance. Liveness stays green (see above).
+  app.get('/api/v1/health/ready', async (_req: Request, res: Response) => {
+    const ready = await store().checkHealth();
+    if (!ready) {
+      return res.status(503).json({
+        status: 'unavailable',
+        database: 'unreachable',
+        timestamp: new Date().toISOString(),
+      });
+    }
+    return res.json({
+      status: 'ok',
+      database: store().mode === 'postgres' ? 'connected' : 'in-memory-test-mode',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   // Protected Admin-Only Detailed Diagnostics Health Check
   app.get(
     '/api/v1/health/detailed',
     requireAuth,
     requireAdmin,
-    (_req: AuthenticatedRequest, res: Response) => {
+    async (_req: AuthenticatedRequest, res: Response) => {
+      const metrics = await store().detailedMetrics();
       res.json({
         status: 'healthy',
         service: 'gogo-central-backend',
+        persistenceMode: store().mode,
         uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
         firebaseProjectId: FIREBASE_PROJECT_ID,
         metrics: {
-          registeredApps: backendStore.products.size,
-          totalUsers: backendStore.users.size,
-          activeDeviceTokens: Array.from(backendStore.devices.values()).filter(
-            (d) => d.status === 'active'
-          ).length,
-          totalCampaigns: backendStore.campaigns.size,
+          registeredApps: metrics.registeredApps,
+          totalUsers: metrics.totalUsers,
+          activeDeviceTokens: metrics.activeDeviceTokens,
+          totalCampaigns: metrics.totalCampaigns,
         },
       });
     }
   );
 
   // Complete Overview Snapshot (Scoped by RBAC role)
-  app.get('/api/v1/overview', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/v1/overview', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const isAdmin = req.user?.role === 'admin';
     const uid = req.user?.uid || '';
 
-    const products = Array.from(backendStore.products.values());
-    const devices = Array.from(backendStore.devices.values()).filter(
-      (d) => isAdmin || d.userId === uid
-    );
-    const preferences = Array.from(backendStore.preferences.values()).filter(
-      (p) => isAdmin || p.userId === uid
-    );
+    const products = await store().listApps();
+    const devices = isAdmin
+      ? await store().listDevices({})
+      : await store().listDevices({ userId: uid });
+    const preferences = isAdmin ? await store().listAllPreferences() : await store().listPreferences(uid);
     const campaigns = isAdmin
-      ? Array.from(backendStore.campaigns.values())
-      : Array.from(backendStore.campaigns.values()).filter(
-          (c) =>
-            c.targetType === 'product' ||
-            c.targetType === 'ecosystem' ||
-            c.targetValue === uid
-        );
+      ? await store().listCampaigns({})
+      : await store().listCampaigns({ visibleToUid: uid });
     const deliveries = isAdmin
-      ? Array.from(backendStore.deliveries.values()).slice(0, 50)
-      : Array.from(backendStore.deliveries.values())
-          .filter((d) => d.userId === uid)
-          .slice(0, 25);
+      ? (await store().listDeliveries({ limit: 50 })).slice(0, 50)
+      : (await store().listDeliveries({ userId: uid, limit: 25 })).slice(0, 25);
 
     res.json({
       currentUser: req.user,
       products,
-      users: isAdmin ? Array.from(backendStore.users.values()) : [],
+      users: isAdmin ? await store().listUsers() : [],
       devices,
       preferences,
       campaigns,
       deliveries,
-      auditLogs: isAdmin ? backendStore.auditLogs.slice(0, 50) : [],
-      securityEvents: isAdmin ? backendStore.securityEvents.slice(0, 50) : [],
-      systemConfigs: isAdmin ? Array.from(backendStore.systemConfigs.values()) : [],
+      auditLogs: isAdmin ? await store().listAuditLogs(50) : [],
+      securityEvents: isAdmin ? await store().listSecurityEvents(50) : [],
+      systemConfigs: isAdmin ? await store().listSystemConfigs() : [],
     });
   });
 
@@ -489,9 +636,9 @@ export async function createGoGoApp() {
   );
 
   // List Registered GoGo Applications
-  app.get('/api/v1/apps', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/v1/apps', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
     res.json({
-      apps: Array.from(backendStore.products.values()),
+      apps: await store().listApps(),
     });
   });
 
@@ -501,7 +648,7 @@ export async function createGoGoApp() {
     sensitiveMutationLimiter,
     requireAuth,
     requireAdmin,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const parsed = RegisterAppSchema.safeParse(req.body);
       if (!parsed.success) {
         return res
@@ -509,30 +656,30 @@ export async function createGoGoApp() {
           .json({ error: 'Invalid application payload', details: parsed.error.issues });
       }
       const data = parsed.data;
-      if (backendStore.products.has(data.appId)) {
+      if (await store().hasApp(data.appId)) {
         return res
           .status(409)
           .json({ error: `Application '${data.appId}' is already registered.` });
       }
 
-      const now = new Date().toISOString();
-      const newApp = {
+      const newApp = await store().createApp({
         appId: data.appId,
-        name: backendStore.sanitizeText(data.name),
+        name: data.name,
         domain: data.domain,
         category: data.category,
         fcmEnabled: data.fcmEnabled,
         webPushEnabled: data.webPushEnabled,
         androidEnabled: data.androidEnabled,
         rateLimitPerMin: data.rateLimitPerMin,
-        activeUsersCount: 1,
-        registeredDevicesCount: 0,
-        createdAt: now,
-        updatedAt: now,
-      };
+      });
 
-      backendStore.products.set(newApp.appId, newApp);
-      backendStore.recordAuditLog(
+      if (!newApp) {
+        return res
+          .status(409)
+          .json({ error: `Application '${data.appId}' is already registered.` });
+      }
+
+      await store().recordAuditLog(
         req.user!.uid,
         newApp.appId,
         'APP_REGISTERED',
@@ -551,10 +698,9 @@ export async function createGoGoApp() {
     sensitiveMutationLimiter,
     requireAuth,
     requireAdmin,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const appId = String(req.params.appId);
-      const existing = backendStore.products.get(appId);
-      if (!existing) {
+      if (!(await store().hasApp(appId))) {
         return res.status(404).json({ error: `GoGo application '${appId}' not found.` });
       }
 
@@ -565,17 +711,12 @@ export async function createGoGoApp() {
           .json({ error: 'Invalid configuration update', details: parsed.error.issues });
       }
 
-      const updates = parsed.data;
-      if (typeof updates.fcmEnabled === 'boolean') existing.fcmEnabled = updates.fcmEnabled;
-      if (typeof updates.webPushEnabled === 'boolean')
-        existing.webPushEnabled = updates.webPushEnabled;
-      if (typeof updates.androidEnabled === 'boolean')
-        existing.androidEnabled = updates.androidEnabled;
-      if (typeof updates.rateLimitPerMin === 'number')
-        existing.rateLimitPerMin = updates.rateLimitPerMin;
-      existing.updatedAt = new Date().toISOString();
+      const existing = await store().updateAppSettings(appId, parsed.data);
+      if (!existing) {
+        return res.status(404).json({ error: `GoGo application '${appId}' not found.` });
+      }
 
-      backendStore.recordAuditLog(
+      await store().recordAuditLog(
         req.user!.uid,
         appId,
         'APP_CONFIG_UPDATE',
@@ -589,12 +730,12 @@ export async function createGoGoApp() {
   );
 
   // List User's Own Devices (or All Devices for Admin)
-  app.get('/api/v1/devices', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/v1/devices', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const isAdmin = req.user!.role === 'admin';
     const uid = req.user!.uid;
-    const devices = Array.from(backendStore.devices.values()).filter(
-      (d) => isAdmin || d.userId === uid
-    );
+    const devices = isAdmin
+      ? await store().listDevices({})
+      : await store().listDevices({ userId: uid });
     return res.json({ devices });
   });
 
@@ -603,7 +744,7 @@ export async function createGoGoApp() {
     '/api/v1/devices/register',
     sensitiveMutationLimiter,
     requireAuth,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const parsed = RegisterDeviceSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({
@@ -613,32 +754,21 @@ export async function createGoGoApp() {
       }
 
       const { appId, fcmToken, platform, userAgent } = parsed.data;
-      if (!backendStore.products.has(appId)) {
+      if (!(await store().hasApp(appId))) {
         return res.status(404).json({ error: `Target GoGo product '${appId}' does not exist.` });
       }
 
-      const now = new Date().toISOString();
       const deviceId = `dev_${appId}_${platform}_${Date.now().toString(36)}`;
-      const record = {
+      const record = await store().createDevice({
         deviceId,
         userId: req.user!.uid, // Strictly bound to verified token UID
         appId,
-        fcmToken: backendStore.sanitizeText(fcmToken),
+        fcmToken,
         platform,
-        userAgent: backendStore.sanitizeText(userAgent),
-        status: 'active' as const,
-        lastRefreshedAt: now,
-        createdAt: now,
-        updatedAt: now,
-      };
+        userAgent,
+      });
 
-      backendStore.devices.set(deviceId, record);
-      const product = backendStore.products.get(appId);
-      if (product) {
-        product.registeredDevicesCount += 1;
-      }
-
-      backendStore.recordAuditLog(
+      await store().recordAuditLog(
         req.user!.uid,
         appId,
         'DEVICE_TOKEN_REGISTER',
@@ -656,30 +786,33 @@ export async function createGoGoApp() {
     '/api/v1/devices/:deviceId',
     sensitiveMutationLimiter,
     requireAuth,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const deviceId = String(req.params.deviceId);
-      const device = backendStore.devices.get(deviceId);
+      const device = await store().getDevice(deviceId);
       if (!device) {
         return res.status(404).json({ error: 'Device token registration not found.' });
       }
 
       if (device.userId !== req.user!.uid && req.user!.role !== 'admin') {
-        backendStore.recordSecurityEvent(
+        await store().recordSecurityEvent(
           'RBAC_VIOLATION',
           device.appId,
           `DELETE /api/v1/devices/${deviceId}`,
           'high',
-          `Blocked user ${req.user!.uid} from revoking device token belonging to ${device.userId}.`
+          `Blocked user ${req.user!.uid} from revoking device token belonging to ${device.userId}.`,
+          extractTrustedClientIp(req)
         );
         return res
           .status(403)
           .json({ error: 'Forbidden: Cannot revoke another user device token.' });
       }
 
-      device.status = 'revoked';
-      device.updatedAt = new Date().toISOString();
+      const revoked = await store().markDeviceStatus(deviceId, 'revoked');
+      if (!revoked) {
+        return res.status(404).json({ error: 'Device token registration not found.' });
+      }
 
-      backendStore.recordAuditLog(
+      await store().recordAuditLog(
         req.user!.uid,
         device.appId,
         'DEVICE_TOKEN_REVOKE',
@@ -688,14 +821,14 @@ export async function createGoGoApp() {
         `Revoked ${device.platform} FCM token ${deviceId} on ${device.appId}.`
       );
 
-      return res.json({ device });
+      return res.json({ device: revoked });
     }
   );
 
   // Get Authenticated User's Notification Preferences
-  app.get('/api/v1/preferences', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/v1/preferences', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const uid = req.user!.uid;
-    const prefs = Array.from(backendStore.preferences.values()).filter((p) => p.userId === uid);
+    const prefs = await store().listPreferences(uid);
     return res.json({ preferences: prefs });
   });
 
@@ -704,9 +837,9 @@ export async function createGoGoApp() {
     '/api/v1/preferences/:appId',
     sensitiveMutationLimiter,
     requireAuth,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const appId = String(req.params.appId);
-      if (!backendStore.products.has(appId)) {
+      if (!(await store().hasApp(appId))) {
         return res.status(404).json({ error: `Unknown GoGo product '${appId}'.` });
       }
 
@@ -719,20 +852,9 @@ export async function createGoGoApp() {
 
       const uid = req.user!.uid;
       const prefId = `${uid}_${appId}`;
-      const now = new Date().toISOString();
-      const existing = backendStore.preferences.get(prefId);
+      const record = await store().upsertPreference(uid, appId, parsed.data);
 
-      const record = {
-        prefId,
-        userId: uid,
-        appId,
-        ...parsed.data,
-        createdAt: existing?.createdAt || now,
-        updatedAt: now,
-      };
-
-      backendStore.preferences.set(prefId, record);
-      backendStore.recordAuditLog(
+      await store().recordAuditLog(
         uid,
         appId,
         'PREFERENCE_UPDATE',
@@ -761,14 +883,14 @@ export async function createGoGoApp() {
       }
 
       const data = parsed.data;
-      if (data.appId !== 'all-gogo' && !backendStore.products.has(data.appId)) {
+      if (data.appId !== 'all-gogo' && !(await store().hasApp(data.appId))) {
         return res
           .status(404)
           .json({ error: `Target GoGo application '${data.appId}' is not registered.` });
       }
 
       try {
-        const result = await backendStore.dispatchNotification({
+        const result = await store().dispatchNotification({
           ...data,
           scheduledFor: data.scheduledFor ?? null,
           authorId: req.user!.uid,
@@ -779,6 +901,8 @@ export async function createGoGoApp() {
         const status = msg.startsWith('UNTRUSTED_DEEPLINK_DOMAIN')
           ? 400
           : msg.startsWith('CONCURRENT_IDEMPOTENCY_LOCK')
+          ? 409
+          : msg.startsWith('IDEMPOTENCY_PAYLOAD_MISMATCH')
           ? 409
           : 422;
         return res.status(status).json({ error: msg });
@@ -792,9 +916,9 @@ export async function createGoGoApp() {
     sensitiveMutationLimiter,
     requireAuth,
     requireAdmin,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const notificationId = String(req.params.notificationId);
-      const outcome = backendStore.retryFailedCampaign(notificationId, req.user!.uid);
+      const outcome = await store().retryFailedCampaign(notificationId, req.user!.uid);
       if (!outcome.campaign) {
         return res.status(404).json({ error: 'Notification campaign not found.' });
       }
@@ -805,15 +929,53 @@ export async function createGoGoApp() {
     }
   );
 
+  // Read Audit Logs (Admin Only, Bounded)
+  app.get(
+    '/api/v1/audit-logs',
+    standardApiLimiter,
+    requireAuth,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || '50'), 10) || 50, 1), 200);
+      const logs = await store().listAuditLogs(limit);
+      return res.json({ auditLogs: logs, count: logs.length, total: await store().countAuditLogs() });
+    }
+  );
+
+  // Read Security Events (Admin Only, Bounded)
+  app.get(
+    '/api/v1/security-events',
+    standardApiLimiter,
+    requireAuth,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || '50'), 10) || 50, 1), 200);
+      const events = await store().listSecurityEvents(limit);
+      return res.json({ securityEvents: events, count: events.length, total: await store().countSecurityEvents() });
+    }
+  );
+
+  // Read System Configuration (Admin Only)
+  app.get(
+    '/api/v1/system-config',
+    standardApiLimiter,
+    requireAuth,
+    requireAdmin,
+    async (_req: AuthenticatedRequest, res: Response) => {
+      const configs = await store().listSystemConfigs();
+      return res.json({ systemConfigs: configs, count: configs.length });
+    }
+  );
+
   // Update System Configuration (Admin Only)
   app.put(
     '/api/v1/system-config/:configKey',
     sensitiveMutationLimiter,
     requireAuth,
     requireAdmin,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const configKey = String(req.params.configKey);
-      const existing = backendStore.systemConfigs.get(configKey);
+      const existing = await store().getSystemConfig(configKey);
       if (!existing) {
         return res.status(404).json({ error: `System config '${configKey}' not found.` });
       }
@@ -823,20 +985,21 @@ export async function createGoGoApp() {
         return res.status(400).json({ error: 'Invalid configValue.' });
       }
 
-      existing.configValue = backendStore.sanitizeText(configValue);
-      existing.updatedBy = req.user!.uid;
-      existing.updatedAt = new Date().toISOString();
+      const updated = await store().updateSystemConfig(configKey, configValue, req.user!.uid);
+      if (!updated) {
+        return res.status(404).json({ error: `System config '${configKey}' not found.` });
+      }
 
-      backendStore.recordAuditLog(
+      await store().recordAuditLog(
         req.user!.uid,
         'central-control',
         'SYSTEM_CONFIG_UPDATE',
         configKey,
         'warn',
-        `Updated system config ${configKey}=${existing.configValue}`
+        `Updated system config ${configKey}=${updated.configValue}`
       );
 
-      return res.json({ config: existing });
+      return res.json({ config: updated });
     }
   );
 
@@ -848,16 +1011,30 @@ export async function createGoGoApp() {
     requireAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
       if (isProductionMode(req) && process.env.ALLOW_PROD_SELF_TEST !== 'true') {
-        backendStore.recordSecurityEvent(
+        await store().recordSecurityEvent(
           'RBAC_VIOLATION',
           'central-control',
           'POST /api/v1/tests/run',
           'high',
-          'Blocked invocation of diagnostic self-test runner in production mode.'
+          'Blocked invocation of diagnostic self-test runner in production mode.',
+          extractTrustedClientIp(req)
         );
         return res.status(403).json({
           error: 'Diagnostic test runner is disabled in production.',
           code: 'TEST_ENDPOINT_DISABLED_IN_PRODUCTION',
+        });
+      }
+
+      // The 13-test suite exercises the in-memory engine (seed integrity,
+      // mutexes, demo tokens). In PostgreSQL mode it does not describe the
+      // runtime, so we skip honestly instead of reporting unrelated results.
+      if (store().mode === 'postgres') {
+        return res.json({
+          status: 'SKIPPED',
+          reason:
+            'SELF_TEST_COVERS_IN_MEMORY_ENGINE_ONLY: PostgreSQL integration is verified by the dedicated integration suite (npm run test:pg).',
+          persistenceMode: 'postgres',
+          timestamp: new Date().toISOString(),
         });
       }
 
@@ -894,14 +1071,33 @@ export async function createGoGoApp() {
     sensitiveMutationLimiter,
     requireAuth,
     requireAdmin,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
+      // In PostgreSQL mode the authoritative backup is pg_dump (the SQL export
+      // would only contain demo seeds — dishonest and NOT a real backup).
+      if (store().mode === 'postgres') {
+        await store().recordAuditLog(
+          req.user!.uid,
+          'central-control',
+          'DATABASE_BACKUP_REQUEST',
+          'pg-dump-guidance',
+          'warn',
+          'SQL export refused in PostgreSQL mode; use pg_dump via scripts/backup-restore.sh.'
+        );
+        return res.status(409).json({
+          error:
+            'In PostgreSQL mode, backups must use pg_dump. Run scripts/backup-restore.sh backup (custom format). The in-memory SQL export is only available in explicit demo mode (GOGO_IN_MEMORY_DEMO=true).',
+          code: 'BACKUP_USES_PG_DUMP',
+          procedure: 'scripts/backup-restore.sh backup',
+        });
+      }
+
       const backupDir = path.resolve(process.cwd(), 'backups');
       fs.mkdirSync(backupDir, { recursive: true });
       const sqlDump = generateTransactionalSqlBackup(backendStore);
       const outPath = path.join(backupDir, 'gogo_central_latest.sql');
       fs.writeFileSync(outPath, sqlDump, 'utf-8');
 
-      backendStore.recordAuditLog(
+      await store().recordAuditLog(
         req.user!.uid,
         'central-control',
         'DATABASE_SQL_BACKUP',
@@ -963,7 +1159,26 @@ export async function createGoGoApp() {
 }
 
 async function startServer() {
-  const app = await createGoGoApp();
+  let app;
+  try {
+    app = await createGoGoApp();
+  } catch (error) {
+    // Startup fails loudly when the required persistence backend is
+    // unavailable. Sanitized message only — never credentials or DSNs.
+    const message =
+      error instanceof Error ? error.message : 'Unknown startup failure';
+    console.log(
+      JSON.stringify({
+        level: 'ERROR',
+        service: 'gogo-central-backend',
+        message: 'Startup aborted: persistence backend unavailable.',
+        reason: message,
+        hint: 'Set SQL_HOST/SQL_PORT/SQL_DB_NAME/SQL_USER/SQL_PASSWORD, or explicitly opt into demo mode with GOGO_IN_MEMORY_DEMO=true (never in production).',
+        timestamp: new Date().toISOString(),
+      })
+    );
+    process.exit(1);
+  }
 
   // Serve Frontend via Vite Middleware in Development or Static Dist in Production
   if (process.env.NODE_ENV !== 'production') {
@@ -1001,10 +1216,26 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       })
     );
-    server.close(() => {
-      process.exit(0);
-    });
-    setTimeout(() => process.exit(0), 5000).unref();
+    backendStore.stopScheduler();
+    // Close the active store (worker loop + PG pool drain). Queued campaigns
+    // stay durable in PostgreSQL; nothing is lost.
+    if (activeStore) {
+      activeStore
+        .close()
+        .catch(() => {
+          // Best-effort drain during shutdown.
+        })
+        .finally(() => {
+          server.close(() => {
+            process.exit(0);
+          });
+        });
+    } else {
+      server.close(() => {
+        process.exit(0);
+      });
+    }
+    setTimeout(() => process.exit(0), 8000).unref();
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));

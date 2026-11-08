@@ -195,6 +195,10 @@ export function generateTransactionalSqlBackup(store: GoGoCentralBackendEngine):
 
   // 1. Export Users
   lines.push('-- Table 1: users');
+  // NOTE: backup covers 10/10 domain tables (users, registered_applications,
+  // user_app_roles, device_tokens, notification_preferences,
+  // notification_campaigns, notification_deliveries, audit_logs,
+  // security_events, system_configs).
   for (const u of store.users.values()) {
     lines.push(
       `INSERT INTO users (uid, display_name, role, is_active, created_at, updated_at) VALUES (${escapeSqlLiteral(
@@ -286,7 +290,69 @@ export function generateTransactionalSqlBackup(store: GoGoCentralBackendEngine):
   }
   lines.push('');
 
-  // 6. Export System Configs
+  // 6. Export User App Roles (derived from users.connectedApps; default role 'member')
+  lines.push('-- Table 3: user_app_roles (derived from users.connectedApps)');
+  for (const u of store.users.values()) {
+    for (const appId of u.connectedApps) {
+      lines.push(
+        `INSERT INTO user_app_roles (user_id, app_id, app_role, last_seen_at, created_at) VALUES (${escapeSqlLiteral(
+          u.uid
+        )}, ${escapeSqlLiteral(appId)}, 'member', ${escapeSqlLiteral(
+          u.updatedAt
+        )}, ${escapeSqlLiteral(u.createdAt)}) ON CONFLICT (user_id, app_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at;`
+      );
+    }
+  }
+  lines.push('');
+
+  // 7. Export Notification Delivery Receipts
+  lines.push('-- Table 7: notification_deliveries');
+  for (const d of store.deliveries.values()) {
+    lines.push(
+      `INSERT INTO notification_deliveries (delivery_id, notification_id, device_id, user_id, app_id, platform, status, attempt_count, fcm_message_id, error_code, delivered_at) VALUES (${escapeSqlLiteral(
+        d.deliveryId
+      )}, ${escapeSqlLiteral(d.notificationId)}, ${escapeSqlLiteral(d.deviceId)}, ${escapeSqlLiteral(
+        d.userId
+      )}, ${escapeSqlLiteral(d.appId)}, ${escapeSqlLiteral(d.platform)}, ${escapeSqlLiteral(
+        d.status
+      )}, ${d.attemptCount}, ${escapeSqlLiteral(d.fcmMessageId)}, ${escapeSqlLiteral(
+        d.errorCode
+      )}, ${escapeSqlLiteral(d.deliveredAt)}) ON CONFLICT (delivery_id) DO UPDATE SET status = EXCLUDED.status, attempt_count = EXCLUDED.attempt_count, fcm_message_id = EXCLUDED.fcm_message_id, error_code = EXCLUDED.error_code;`
+    );
+  }
+  lines.push('');
+
+  // 8. Export Audit Logs
+  lines.push('-- Table 8: audit_logs');
+  for (const l of store.auditLogs) {
+    lines.push(
+      `INSERT INTO audit_logs (log_id, actor_id, app_id, action, resource_id, severity, details, created_at) VALUES (${escapeSqlLiteral(
+        l.logId
+      )}, ${escapeSqlLiteral(l.actorId)}, ${escapeSqlLiteral(l.appId)}, ${escapeSqlLiteral(
+        l.action
+      )}, ${escapeSqlLiteral(l.resourceId)}, ${escapeSqlLiteral(l.severity)}, ${escapeSqlLiteral(
+        l.details
+      )}, ${escapeSqlLiteral(l.createdAt)}) ON CONFLICT (log_id) DO UPDATE SET details = EXCLUDED.details, severity = EXCLUDED.severity;`
+    );
+  }
+  lines.push('');
+
+  // 9. Export Security Events
+  lines.push('-- Table 9: security_events');
+  for (const e of store.securityEvents) {
+    lines.push(
+      `INSERT INTO security_events (event_id, event_type, app_id, actor_ip_hash, endpoint, severity, mitigation_applied, created_at) VALUES (${escapeSqlLiteral(
+        e.eventId
+      )}, ${escapeSqlLiteral(e.eventType)}, ${escapeSqlLiteral(e.appId)}, ${escapeSqlLiteral(
+        e.actorIpHash
+      )}, ${escapeSqlLiteral(e.endpoint)}, ${escapeSqlLiteral(e.severity)}, ${escapeSqlLiteral(
+        e.mitigationApplied
+      )}, ${escapeSqlLiteral(e.createdAt)}) ON CONFLICT (event_id) DO UPDATE SET severity = EXCLUDED.severity, mitigation_applied = EXCLUDED.mitigation_applied;`
+    );
+  }
+  lines.push('');
+
+  // 10. Export System Configs
   lines.push('-- Table 10: system_configs');
   for (const cfg of store.systemConfigs.values()) {
     lines.push(

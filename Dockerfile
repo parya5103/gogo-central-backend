@@ -1,13 +1,15 @@
 # ==============================================================================
 # Stage 1: Dependencies & Build Stage
 # ==============================================================================
-FROM node:22-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies
-COPY package.json package-lock.json* ./
-RUN npm ci
+# Install dependencies reproducibly from the committed package-lock.json
+# (generated and npm ci-verified in CI; the stale bun.lock was removed —
+# npm is the single supported package manager).
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
 # Copy application source and build frontend assets + verify TypeScript strict mode
 COPY . .
@@ -19,7 +21,7 @@ RUN npm prune --omit=dev
 # ==============================================================================
 # Stage 2: Production Hardened Non-Root Runtime Stage
 # ==============================================================================
-FROM node:22-alpine AS runner
+FROM node:24-alpine AS runner
 
 WORKDIR /app
 
@@ -46,8 +48,10 @@ USER gogo
 
 EXPOSE 3000
 
-# Container healthcheck probing versioned health endpoint
+# Container healthcheck probing the readiness endpoint (HTTP + PostgreSQL
+# connectivity). Liveness (/api/v1/health/live) stays process-only so a brief
+# database outage does not kill a healthy instance.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/v1/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/v1/health/ready || exit 1
 
 CMD ["node", "--import", "tsx", "server.ts"]

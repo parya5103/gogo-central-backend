@@ -19,6 +19,14 @@ import type {
 } from '../types/gogo.ts';
 import { adminMessaging, ROOT_ADMIN_EMAIL } from '../lib/firebase-admin.ts';
 import { runSecurityRulesVerification } from '../../firestore.rules.test.ts';
+import { generateTransactionalSqlBackup } from '../db/postgres-config.ts';
+import { createHash } from 'node:crypto';
+
+/** Hard cap for in-memory audit/security telemetry arrays (prevents unbounded growth). */
+const MAX_AUDIT_LOGS = 5000;
+const MAX_SECURITY_EVENTS = 2000;
+/** FCM sendEachForMulticast hard limit: 500 registration tokens per call. */
+const FCM_MULTICAST_CHUNK = 500;
 
 export class GoGoCentralBackendEngine {
   public products: Map<string, GoGoProduct> = new Map();
@@ -33,6 +41,8 @@ export class GoGoCentralBackendEngine {
   public auditLogs: AuditLogRecord[] = [];
   public securityEvents: SecurityEventRecord[] = [];
   public systemConfigs: Map<string, SystemConfigRecord> = new Map();
+  /** In-process scheduled-campaign dispatcher timer (single-instance deployments). */
+  private schedulerTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.seedInitialEcosystem();
@@ -56,12 +66,7 @@ export class GoGoCentralBackendEngine {
       const parsed = new URL(deepLinkUrl);
       if (parsed.protocol !== 'https:') return false;
       const host = parsed.hostname.toLowerCase();
-      if (
-        host === 'gogocompany.in' ||
-        host.endsWith('.gogocompany.in') ||
-        host === 'sarkarisaathi.com' ||
-        host.endsWith('.sarkarisaathi.com')
-      ) {
+      if (host === 'gogocompany.in' || host.endsWith('.gogocompany.in')) {
         return true;
       }
       // Also allow domains of dynamically registered GoGo products
@@ -576,6 +581,9 @@ export class GoGoCentralBackendEngine {
       createdAt: new Date().toISOString(),
     };
     this.auditLogs.unshift(entry);
+    if (this.auditLogs.length > MAX_AUDIT_LOGS) {
+      this.auditLogs.length = MAX_AUDIT_LOGS;
+    }
     return entry;
   }
 
@@ -584,19 +592,27 @@ export class GoGoCentralBackendEngine {
     appId: string,
     endpoint: string,
     severity: SecurityEventRecord['severity'],
-    mitigationApplied: string
+    mitigationApplied: string,
+    clientIp?: string
   ): SecurityEventRecord {
     const evt: SecurityEventRecord = {
       eventId: `sec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       eventType,
       appId,
-      actorIpHash: `sha256:${Math.random().toString(16).slice(2, 10)}`,
+      // Real truncated SHA-256 of the trusted client IP. 'unknown' when no IP
+      // was available (e.g. store-level tests); never a fabricated random hash.
+      actorIpHash: clientIp
+        ? `sha256:${createHash('sha256').update(clientIp).digest('hex').slice(0, 16)}`
+        : 'unknown',
       endpoint,
       severity,
       mitigationApplied,
       createdAt: new Date().toISOString(),
     };
     this.securityEvents.unshift(evt);
+    if (this.securityEvents.length > MAX_SECURITY_EVENTS) {
+      this.securityEvents.length = MAX_SECURITY_EVENTS;
+    }
     return evt;
   }
 
@@ -625,6 +641,16 @@ export class GoGoCentralBackendEngine {
         `Blocked untrusted deepLink domain (${params.deepLink}); deepLink must target an HTTPS GoGo domain.`
       );
       throw new Error('UNTRUSTED_DEEPLINK_DOMAIN: Deep link must use HTTPS and belong to a registered GoGo domain.');
+    }
+
+    // Idempotency TTL: drop keys whose campaign is older than idempotency_ttl_hours (default 72h)
+    const ttlHours = Number(this.systemConfigs.get('idempotency_ttl_hours')?.configValue || 72);
+    const ttlCutoff = Date.now() - ttlHours * 60 * 60 * 1000;
+    for (const [key, notifId] of this.idempotencyIndex) {
+      const c = this.campaigns.get(notifId);
+      if (c && new Date(c.createdAt).getTime() < ttlCutoff) {
+        this.idempotencyIndex.delete(key);
+      }
     }
 
     // Check completed idempotency index or synchronous in-flight mutex
@@ -684,115 +710,23 @@ export class GoGoCentralBackendEngine {
       });
 
       const deliveriesCreated: DeliveryReceiptRecord[] = [];
-      let sentCount = 0;
-      const failedCount = 0;
 
       if (!isScheduled) {
-        const realTokens = candidateDevices
-          .map((d) => d.fcmToken)
-          .filter((t) => !t.startsWith('fcm_'));
-
-        if (realTokens.length > 0) {
-          try {
-            await adminMessaging.sendEachForMulticast(
-              {
-                tokens: realTokens,
-                notification: {
-                  title: this.sanitizeText(params.title),
-                  body: this.sanitizeText(params.body),
-                },
-                webpush: {
-                  fcmOptions: {
-                    link: params.deepLink,
-                  },
-                },
-              },
-              true
-            );
-          } catch {
-            // Gracefully handled per-device below when FCM credentials are in local/emulator mode
-          }
-        }
-
-        for (const dev of candidateDevices) {
-          // Prune tokens that simulate unregistration
-          if (dev.fcmToken.includes('expired') || dev.fcmToken.includes('unregistered')) {
-            dev.status = 'expired';
-            dev.updatedAt = now;
-            deliveriesCreated.push({
-              deliveryId: `del_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-              notificationId,
-              deviceId: dev.deviceId,
-              userId: dev.userId,
-              appId: dev.appId,
-              platform: dev.platform,
-              status: 'failed_expired_token',
-              attemptCount: 1,
-              fcmMessageId: null,
-              errorCode: 'messaging/registration-token-not-registered',
-              deliveredAt: now,
-            });
-            continue;
-          }
-
-          // Server-side enforcement of user + product notification preferences
-          const pref = this.preferences.get(`${dev.userId}_${dev.appId}`);
-          if (
-            pref &&
-            (!pref.enabled ||
-              (dev.platform === 'web' && !pref.webPush) ||
-              (dev.platform === 'android' && !pref.androidPush))
-          ) {
-            deliveriesCreated.push({
-              deliveryId: `del_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-              notificationId,
-              deviceId: dev.deviceId,
-              userId: dev.userId,
-              appId: dev.appId,
-              platform: dev.platform,
-              status: 'skipped_preference',
-              attemptCount: 1,
-              fcmMessageId: null,
-              errorCode: 'user-preference-disabled',
-              deliveredAt: now,
-            });
-            continue;
-          }
-
-          const msgId = `projects/gen-lang-client-0566323659/messages/0:${Date.now()}${Math.floor(
-            Math.random() * 90 + 10
-          )}`;
-          const receipt: DeliveryReceiptRecord = {
-            deliveryId: `del_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            notificationId,
-            deviceId: dev.deviceId,
-            userId: dev.userId,
-            appId: dev.appId,
-            platform: dev.platform,
-            status: 'delivered',
-            attemptCount: 1,
-            fcmMessageId: msgId,
-            errorCode: null,
-            deliveredAt: now,
-          };
-          this.deliveries.set(receipt.deliveryId, receipt);
-          deliveriesCreated.push(receipt);
-          sentCount += 1;
-        }
-
-        if (params.targetType === 'product' || params.targetType === 'broadcast') {
-          const prod = this.products.get(params.appId);
-          if (prod) {
-            sentCount = Math.max(sentCount, prod.registeredDevicesCount);
-          }
-        } else if (params.targetType === 'ecosystem') {
-          let total = 0;
-          for (const prod of this.products.values()) {
-            if (prod.fcmEnabled) total += prod.registeredDevicesCount;
-          }
-          sentCount = Math.max(sentCount, total);
-        }
+        const deliveryOutcome = await this.deliverToDevices(notificationId, candidateDevices, {
+          appId: params.appId,
+          targetType: params.targetType,
+          title: params.title,
+          body: params.body,
+          deepLink: params.deepLink,
+        });
+        deliveriesCreated.push(...deliveryOutcome.receipts);
       }
+
+      // Honest, receipt-derived counts. No inflation, no fabricated metrics.
+      const sentCount = deliveriesCreated.filter((d) => d.status === 'delivered').length;
+      const failedCount = deliveriesCreated.filter(
+        (d) => d.status === 'failed_transient' || d.status === 'failed_expired_token'
+      ).length;
 
       const campaign: NotificationCampaignRecord = {
         notificationId,
@@ -838,10 +772,247 @@ export class GoGoCentralBackendEngine {
     }
   }
 
-  public retryFailedCampaign(
+  /** Marketing-style campaign targets (broadcast segments); individual/targeted are transactional. */
+  private isMarketingTarget(targetType: NotificationCampaignRecord['targetType']): boolean {
+    return (
+      targetType === 'product' ||
+      targetType === 'broadcast' ||
+      targetType === 'ecosystem' ||
+      targetType === 'group' ||
+      targetType === 'topic'
+    );
+  }
+
+  /**
+   * Server-side preference gate. Returns null when delivery is allowed,
+   * otherwise a machine-readable skip reason recorded on the receipt.
+   */
+  private prefAllowsDelivery(
+    userId: string,
+    appId: string,
+    platform: 'web' | 'android',
+    isMarketing: boolean
+  ): string | null {
+    const pref = this.preferences.get(`${userId}_${appId}`);
+    if (!pref) return null;
+    if (!pref.enabled) return 'user-preference-disabled';
+    if (platform === 'web' && !pref.webPush) return 'user-preference-web-disabled';
+    if (platform === 'android' && !pref.androidPush) return 'user-preference-android-disabled';
+    if (isMarketing && !pref.marketingAlerts) return 'user-marketing-opt-out';
+    if (!isMarketing && !pref.transactionalAlerts) return 'user-transactional-opt-out';
+    return null;
+  }
+
+  /**
+   * Honest FCM dispatch engine.
+   * - Demo `fcm_*` tokens (local development without Firebase credentials) are
+   *   simulated as delivered and clearly marked with `simulated:` message IDs.
+   * - Real tokens are sent through adminMessaging.sendEachForMulticast in
+   *   500-token chunks. FCM_DRY_RUN=true keeps live delivery in dry-run mode.
+   * - sentCount/failedCount are derived strictly from delivery receipts. No
+   *   registeredDevicesCount inflation, no fabricated message IDs, no silent
+   *   dry-run swallowing.
+   */
+  private async deliverToDevices(
+    notificationId: string,
+    devices: DeviceTokenRecord[],
+    params: {
+      appId: string;
+      targetType: NotificationCampaignRecord['targetType'];
+      title: string;
+      body: string;
+      deepLink: string;
+    }
+  ): Promise<{ receipts: DeliveryReceiptRecord[]; sentCount: number; failedCount: number }> {
+    const now = new Date().toISOString();
+    const isMarketing = this.isMarketingTarget(params.targetType);
+    const receipts: DeliveryReceiptRecord[] = [];
+    const realDevices: DeviceTokenRecord[] = [];
+
+    const makeReceipt = (
+      dev: DeviceTokenRecord,
+      status: DeliveryReceiptRecord['status'],
+      errorCode: string | null,
+      fcmMessageId: string | null
+    ): DeliveryReceiptRecord => ({
+      deliveryId: `del_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      notificationId,
+      deviceId: dev.deviceId,
+      userId: dev.userId,
+      appId: dev.appId,
+      platform: dev.platform,
+      status,
+      attemptCount: 1,
+      fcmMessageId,
+      errorCode,
+      deliveredAt: now,
+    });
+
+    const record = (receipt: DeliveryReceiptRecord): void => {
+      this.deliveries.set(receipt.deliveryId, receipt);
+      receipts.push(receipt);
+    };
+
+    for (const dev of devices) {
+      // Prune tokens that simulate unregistration before any send
+      if (dev.fcmToken.includes('expired') || dev.fcmToken.includes('unregistered')) {
+        dev.status = 'expired';
+        dev.updatedAt = now;
+        this.recordSecurityEvent(
+          'EXPIRED_FCM_TOKEN_PRUNED',
+          dev.appId,
+          'deliverToDevices',
+          'low',
+          `Marked ${dev.deviceId} status=expired before dispatch (unregistered token).`
+        );
+        record(makeReceipt(dev, 'failed_expired_token', 'messaging/registration-token-not-registered', null));
+        continue;
+      }
+
+      // Server-side enforcement of user + product notification preferences
+      const skipReason = this.prefAllowsDelivery(dev.userId, dev.appId, dev.platform, isMarketing);
+      if (skipReason) {
+        record(makeReceipt(dev, 'skipped_preference', skipReason, null));
+        continue;
+      }
+
+      if (dev.fcmToken.startsWith('fcm_')) {
+        // Local demo token: simulate delivery (no Firebase credentials needed)
+        record(makeReceipt(dev, 'delivered', null, `simulated:${dev.fcmToken.slice(0, 16)}`));
+      } else {
+        realDevices.push(dev);
+      }
+    }
+
+    // Real FCM delivery in 500-token multicast chunks
+    for (let i = 0; i < realDevices.length; i += FCM_MULTICAST_CHUNK) {
+      const chunk = realDevices.slice(i, i + FCM_MULTICAST_CHUNK);
+      try {
+        const response = await adminMessaging.sendEachForMulticast(
+          {
+            tokens: chunk.map((d) => d.fcmToken),
+            notification: {
+              title: this.sanitizeText(params.title),
+              body: this.sanitizeText(params.body),
+            },
+            webpush: {
+              fcmOptions: {
+                link: params.deepLink,
+              },
+            },
+          },
+          process.env.FCM_DRY_RUN === 'true'
+        );
+        response.responses.forEach((resp, idx) => {
+          const dev = chunk[idx];
+          if (resp.success) {
+            record(makeReceipt(dev, 'delivered', null, resp.messageId ?? null));
+          } else {
+            record(
+              makeReceipt(
+                dev,
+                'failed_transient',
+                resp.error ? String(resp.error) : 'messaging/unknown-error',
+                null
+              )
+            );
+          }
+        });
+      } catch {
+        // Whole-chunk transport failure: honest failed_transient receipts, no fabrication
+        for (const dev of chunk) {
+          record(makeReceipt(dev, 'failed_transient', 'messaging/transport-unavailable', null));
+        }
+      }
+    }
+
+    const sentCount = receipts.filter((r) => r.status === 'delivered').length;
+    const failedCount = receipts.filter(
+      (r) => r.status === 'failed_transient' || r.status === 'failed_expired_token'
+    ).length;
+    return { receipts, sentCount, failedCount };
+  }
+
+  /** Start the in-process scheduled-campaign dispatcher (single-instance deployments). */
+  public startScheduler(intervalMs = 30000): void {
+    if (this.schedulerTimer) return;
+    this.schedulerTimer = setInterval(() => {
+      this.processDueScheduledCampaigns().catch(() => {
+        // Scheduler errors are non-fatal; the next tick retries.
+      });
+    }, intervalMs);
+    if (typeof this.schedulerTimer.unref === 'function') {
+      this.schedulerTimer.unref();
+    }
+  }
+
+  /** Stop the in-process scheduler (graceful shutdown). */
+  public stopScheduler(): void {
+    if (this.schedulerTimer) {
+      clearInterval(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
+  }
+
+  /**
+   * Dispatches all scheduled campaigns whose scheduledFor time has passed.
+   * Returns the number of campaigns dispatched in this tick.
+   */
+  public async processDueScheduledCampaigns(): Promise<number> {
+    const now = Date.now();
+    let dispatched = 0;
+    for (const campaign of this.campaigns.values()) {
+      if (campaign.status !== 'scheduled' || !campaign.scheduledFor) continue;
+      if (new Date(campaign.scheduledFor).getTime() > now) continue;
+
+      const devices = Array.from(this.devices.values()).filter((dev) => {
+        if (dev.status !== 'active') return false;
+        if (campaign.appId !== 'all-gogo' && dev.appId !== campaign.appId) return false;
+        if (campaign.platform !== 'all' && dev.platform !== campaign.platform) return false;
+        if (campaign.targetType === 'individual' || campaign.targetType === 'targeted') {
+          return dev.userId === campaign.targetValue || dev.deviceId === campaign.targetValue;
+        }
+        return true;
+      });
+
+      const outcome = await this.deliverToDevices(campaign.notificationId, devices, {
+        appId: campaign.appId,
+        targetType: campaign.targetType,
+        title: campaign.title,
+        body: campaign.body,
+        deepLink: campaign.deepLink,
+      });
+
+      campaign.status = outcome.failedCount > 0 ? 'partial_failure' : 'delivered';
+      campaign.sentCount = outcome.sentCount;
+      campaign.failedCount = outcome.failedCount;
+      campaign.updatedAt = new Date().toISOString();
+
+      this.recordAuditLog(
+        campaign.authorId,
+        campaign.appId,
+        'NOTIFICATION_DISPATCH',
+        campaign.notificationId,
+        'info',
+        `Scheduled campaign dispatched (${outcome.sentCount} delivered, ${outcome.failedCount} failed, ${
+          outcome.receipts.length - outcome.sentCount - outcome.failedCount
+        } skipped).`
+      );
+      dispatched += 1;
+    }
+    return dispatched;
+  }
+
+  /**
+   * Honest bounded retry: only failed_transient receipts are retried. Demo
+   * `fcm_*` tokens simulate a successful retry; real tokens are re-sent via
+   * adminMessaging.send and only marked delivered on an actual success.
+   * Campaign counters are recomputed from receipts, never fabricated.
+   */
+  public async retryFailedCampaign(
     notificationId: string,
     actorId: string
-  ): { campaign: NotificationCampaignRecord | null; error?: string } {
+  ): Promise<{ campaign: NotificationCampaignRecord | null; error?: string }> {
     const campaign = this.campaigns.get(notificationId);
     if (!campaign) return { campaign: null, error: 'NOT_FOUND' };
 
@@ -853,22 +1024,70 @@ export class GoGoCentralBackendEngine {
       };
     }
 
-    const recovered = campaign.failedCount;
-    campaign.sentCount += recovered;
-    campaign.failedCount = 0;
-    campaign.retryCount += 1;
-    campaign.status = 'delivered';
-    campaign.updatedAt = new Date().toISOString();
+    const failedDeliveries = Array.from(this.deliveries.values()).filter(
+      (d) => d.notificationId === notificationId && d.status === 'failed_transient'
+    );
 
-    for (const del of this.deliveries.values()) {
-      if (del.notificationId === notificationId && del.status === 'failed_transient') {
+    if (failedDeliveries.length === 0) {
+      return {
+        campaign,
+        error: 'NO_TRANSIENT_FAILURES_TO_RETRY: No failed_transient deliveries exist for this campaign.',
+      };
+    }
+
+    const now = new Date().toISOString();
+    let recovered = 0;
+    let stillFailed = 0;
+
+    for (const del of failedDeliveries) {
+      const device = this.devices.get(del.deviceId);
+
+      if (device && device.fcmToken.startsWith('fcm_')) {
+        // Local demo token: simulate a successful retry attempt
         del.status = 'delivered';
         del.attemptCount += 1;
         del.errorCode = null;
-        del.fcmMessageId = `projects/gen-lang-client-0566323659/messages/0:retry_${Date.now()}`;
-        del.deliveredAt = new Date().toISOString();
+        del.fcmMessageId = `simulated:retry_${device.fcmToken.slice(0, 16)}`;
+        del.deliveredAt = now;
+        recovered += 1;
+        continue;
+      }
+
+      if (!device || !device.fcmToken) {
+        del.attemptCount += 1;
+        del.deliveredAt = now;
+        stillFailed += 1;
+        continue;
+      }
+
+      try {
+        const messageId = await adminMessaging.send(
+          {
+            token: device.fcmToken,
+            notification: { title: campaign.title, body: campaign.body },
+            webpush: { fcmOptions: { link: campaign.deepLink } },
+          },
+          process.env.FCM_DRY_RUN === 'true'
+        );
+        del.status = 'delivered';
+        del.attemptCount += 1;
+        del.errorCode = null;
+        del.fcmMessageId = messageId;
+        del.deliveredAt = now;
+        recovered += 1;
+      } catch (error) {
+        del.attemptCount += 1;
+        del.errorCode = error instanceof Error ? error.message.slice(0, 64) : 'messaging/unknown-error';
+        del.deliveredAt = now;
+        stillFailed += 1;
       }
     }
+
+    campaign.retryCount += 1;
+    campaign.sentCount += recovered;
+    campaign.failedCount = stillFailed;
+    campaign.status = stillFailed > 0 ? 'partial_failure' : 'delivered';
+    campaign.updatedAt = now;
 
     this.recordAuditLog(
       actorId,
@@ -876,15 +1095,16 @@ export class GoGoCentralBackendEngine {
       'NOTIFICATION_RETRY',
       notificationId,
       'info',
-      `Executed exponential backoff retry #${campaign.retryCount} for ${notificationId}; recovered ${recovered} transient failures.`
+      `Executed retry #${campaign.retryCount} for ${notificationId}; ${recovered} recovered, ${stillFailed} still failing.`
     );
 
     return { campaign };
   }
-
   /**
-   * Executes the comprehensive 14-point Security, Reliability & Regression Test Suite
-   * using an isolated engine instance so live production/preview state is never mutated.
+  /**
+   * Honest executable regression suite (13 tests). Every `passed` value is computed
+   * from real assertions against an isolated engine instance. Nothing is hardcoded:
+   * a broken guard MUST fail its test here instead of reporting fake success.
    */
   public async runAutomatedTestSuite(): Promise<{
     passedCount: number;
@@ -894,9 +1114,27 @@ export class GoGoCentralBackendEngine {
     results: TestCaseResult[];
   }> {
     const isolatedStore = new GoGoCentralBackendEngine();
-    const rulesVerification = runSecurityRulesVerification();
+    const results: TestCaseResult[] = [];
+    const now = new Date().toISOString();
 
-    // Regression Test: Concurrent Duplicate Notification Dispatch
+    // TEST-01: Seeded ecosystem integrity
+    const seededIntegrity =
+      isolatedStore.products.size === 5 &&
+      isolatedStore.users.size === 4 &&
+      isolatedStore.devices.size === 6 &&
+      isolatedStore.preferences.size === 10 &&
+      isolatedStore.systemConfigs.size === 4;
+    results.push({
+      id: 'TEST-01',
+      phase: 'Seed Integrity',
+      name: 'Seeded ecosystem loads 5 products, 4 users, 10 preferences, 6 devices, 4 configs',
+      category: 'database',
+      passed: seededIntegrity,
+      durationMs: 1,
+      assertionDetail: `products=${isolatedStore.products.size}, users=${isolatedStore.users.size}, devices=${isolatedStore.devices.size}, prefs=${isolatedStore.preferences.size}, configs=${isolatedStore.systemConfigs.size}`,
+    });
+
+    // TEST-02: Concurrent idempotency mutex
     const concurrentKey = `idem_concurrent_test_${Date.now()}`;
     const [firstAttempt, secondAttempt] = await Promise.allSettled([
       isolatedStore.dispatchNotification({
@@ -924,18 +1162,25 @@ export class GoGoCentralBackendEngine {
         authorId: 'uid_admin_root',
       }),
     ]);
-
     const concurrentSafe =
       firstAttempt.status === 'fulfilled' &&
       !firstAttempt.value.duplicatePrevented &&
       ((secondAttempt.status === 'fulfilled' && secondAttempt.value.duplicatePrevented) ||
         secondAttempt.status === 'rejected');
+    results.push({
+      id: 'TEST-02',
+      phase: 'Priority 3: Concurrent Idempotency Lock',
+      name: 'Synchronous In-Flight Mutex Prevents Concurrent Duplicate Broadcasts',
+      category: 'idempotency',
+      passed: concurrentSafe,
+      durationMs: 4,
+      assertionDetail:
+        'Parallel dispatch with identical idempotencyKey executes once; the duplicate is blocked or rejected.',
+    });
 
-    // Regression Test: Server-Side Notification Preference Enforcement
+    // TEST-03: Master preference opt-out enforcement
     const targetPref = isolatedStore.preferences.get('uid_sarkari_aspirant_01_sarkari-sarthi');
-    if (targetPref) {
-      targetPref.enabled = false;
-    }
+    if (targetPref) targetPref.enabled = false;
     const prefCheckResult = await isolatedStore.dispatchNotification({
       idempotencyKey: `idem_pref_enforcement_${Date.now()}`,
       appId: 'sarkari-sarthi',
@@ -951,8 +1196,46 @@ export class GoGoCentralBackendEngine {
     const prefSkippedCorrectly =
       prefCheckResult.campaign.sentCount === 0 &&
       prefCheckResult.deliveriesCreated.some((d) => d.status === 'skipped_preference');
+    if (targetPref) targetPref.enabled = true;
+    results.push({
+      id: 'TEST-03',
+      phase: 'Priority 3: Server-Side Preference Enforcement',
+      name: 'Opted-Out Users (enabled=false) Excluded Server-Side',
+      category: 'fcm',
+      passed: prefSkippedCorrectly,
+      durationMs: 4,
+      assertionDetail:
+        'Disabling the master preference records skipped_preference receipts and sends 0 FCM messages.',
+    });
 
-    // Regression Test: Deep-Link Phishing Domain Rejection
+    // TEST-04: Marketing opt-out enforcement (marketingAlerts=false)
+    const marketingResult = await isolatedStore.dispatchNotification({
+      idempotencyKey: `idem_marketing_optout_${Date.now()}`,
+      appId: 'sarkari-sarthi',
+      targetType: 'product',
+      targetValue: 'all',
+      platform: 'all',
+      title: 'Marketing Opt-Out Check',
+      body: 'Users with marketingAlerts=false must be skipped.',
+      deepLink: 'https://gogocompany.in/sarkari-sarthi/',
+      scheduledFor: null,
+      authorId: 'uid_admin_root',
+    });
+    const marketingOptOutRespected =
+      marketingResult.campaign.sentCount === 0 &&
+      marketingResult.deliveriesCreated.some((d) => d.status === 'skipped_preference');
+    results.push({
+      id: 'TEST-04',
+      phase: 'Priority 3: Marketing Alert Preference Enforcement',
+      name: 'Product Broadcasts Respect marketingAlerts=false Preferences',
+      category: 'fcm',
+      passed: marketingOptOutRespected,
+      durationMs: 4,
+      assertionDetail:
+        `Product broadcast produced ${marketingResult.deliveriesCreated.length} receipts, all skipped_preference; sentCount=${marketingResult.campaign.sentCount} (no inflation).`,
+    });
+
+    // TEST-05: Deep-link phishing domain rejection
     let phishingBlocked = false;
     try {
       await isolatedStore.dispatchNotification({
@@ -970,137 +1253,251 @@ export class GoGoCentralBackendEngine {
     } catch {
       phishingBlocked = true;
     }
+    results.push({
+      id: 'TEST-05',
+      phase: 'Priority 2: Phishing Defense',
+      name: 'Block External Non-GoGo DeepLink Domains',
+      category: 'security',
+      passed: phishingBlocked,
+      durationMs: 3,
+      assertionDetail:
+        'Dispatch with https://evil-attacker-domain.example.com/phish deepLink rejected with UNTRUSTED_DEEPLINK_DOMAIN.',
+    });
 
-    // Regression Test: Max Retry Cap Enforcement (fcm_max_retries = 3)
-    isolatedStore.retryFailedCampaign('notif_crystal_weekend_quest', 'uid_admin_root'); // retry #2
-    isolatedStore.retryFailedCampaign('notif_crystal_weekend_quest', 'uid_admin_root'); // retry #3
-    const fourthRetry = isolatedStore.retryFailedCampaign(
-      'notif_crystal_weekend_quest',
-      'uid_admin_root'
-    );
+    // TEST-06: Expired token auto-pruning
+    isolatedStore.devices.set('dev_test_stale_99', {
+      deviceId: 'dev_test_stale_99',
+      userId: 'uid_sarkari_aspirant_01',
+      appId: 'sarkari-sarthi',
+      fcmToken: 'fcm_expired_unregistered_synthetic_000',
+      platform: 'web',
+      userAgent: 'Synthetic stale token test',
+      status: 'active',
+      lastRefreshedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const pruneResult = await isolatedStore.dispatchNotification({
+      idempotencyKey: `idem_prune_test_${Date.now()}`,
+      appId: 'sarkari-sarthi',
+      targetType: 'individual',
+      targetValue: 'uid_sarkari_aspirant_01',
+      platform: 'web',
+      title: 'Prune Check',
+      body: 'Synthetic expired token must be pruned.',
+      deepLink: 'https://gogocompany.in/sarkari-sarthi/',
+      scheduledFor: null,
+      authorId: 'uid_admin_root',
+    });
+    const pruneWorked =
+      isolatedStore.devices.get('dev_test_stale_99')?.status === 'expired' &&
+      pruneResult.deliveriesCreated.some((d) => d.status === 'failed_expired_token');
+    isolatedStore.devices.delete('dev_test_stale_99');
+    results.push({
+      id: 'TEST-06',
+      phase: 'Priority 3: Retry Limit & Token Cleanup',
+      name: 'Unregistered Tokens Auto-Pruned to status=expired',
+      category: 'fcm',
+      passed: pruneWorked,
+      durationMs: 3,
+      assertionDetail:
+        'Synthetic active device with an expired/unregistered token transitions to expired and records failed_expired_token.',
+    });
+
+    // TEST-07: Honest receipt-based sent/failed counts (no inflation)
+    const honestResult = await isolatedStore.dispatchNotification({
+      idempotencyKey: `idem_honest_count_${Date.now()}`,
+      appId: 'sarkari-sarthi',
+      targetType: 'individual',
+      targetValue: 'uid_sarkari_aspirant_01',
+      platform: 'web',
+      title: 'Honest Count Check',
+      body: 'sentCount must equal delivered receipts only.',
+      deepLink: 'https://gogocompany.in/sarkari-sarthi/',
+      scheduledFor: null,
+      authorId: 'uid_admin_root',
+    });
+    const deliveredReceipts = honestResult.deliveriesCreated.filter((d) => d.status === 'delivered').length;
+    const failedReceipts = honestResult.deliveriesCreated.filter(
+      (d) => d.status === 'failed_transient' || d.status === 'failed_expired_token'
+    ).length;
+    const honestCounts =
+      honestResult.campaign.sentCount === deliveredReceipts &&
+      honestResult.campaign.failedCount === failedReceipts &&
+      honestResult.campaign.sentCount <= honestResult.deliveriesCreated.length;
+    results.push({
+      id: 'TEST-07',
+      phase: 'Priority 4: Honest Metrics',
+      name: 'sentCount/failedCount Derived Strictly From Delivery Receipts',
+      category: 'fcm',
+      passed: honestCounts,
+      durationMs: 3,
+      assertionDetail: `sentCount=${honestResult.campaign.sentCount} equals delivered receipts (${deliveredReceipts}) of ${honestResult.deliveriesCreated.length} total; no registeredDevicesCount inflation.`,
+    });
+
+    // TEST-08: Bounded retry cap (fcm_max_retries)
+    isolatedStore.campaigns.set('notif_retry_cap_99', {
+      notificationId: 'notif_retry_cap_99',
+      idempotencyKey: 'idem_retry_cap_99',
+      appId: 'sarkari-sarthi',
+      targetType: 'individual',
+      targetValue: 'uid_sarkari_aspirant_01',
+      platform: 'web',
+      title: 'Retry Cap',
+      body: 'x',
+      deepLink: 'https://gogocompany.in/sarkari-sarthi/',
+      scheduledFor: null,
+      status: 'partial_failure',
+      sentCount: 0,
+      failedCount: 1,
+      retryCount: 3,
+      authorId: 'uid_admin_root',
+      createdAt: now,
+      updatedAt: now,
+    });
+    isolatedStore.deliveries.set('del_retry_cap_99', {
+      deliveryId: 'del_retry_cap_99',
+      notificationId: 'notif_retry_cap_99',
+      deviceId: 'dev_sarkari_web_01',
+      userId: 'uid_sarkari_aspirant_01',
+      appId: 'sarkari-sarthi',
+      platform: 'web',
+      status: 'failed_transient',
+      attemptCount: 1,
+      fcmMessageId: null,
+      errorCode: 'messaging/server-unavailable',
+      deliveredAt: now,
+    });
+    const capAttempt = await isolatedStore.retryFailedCampaign('notif_retry_cap_99', 'uid_admin_root');
     const retryCapEnforced = Boolean(
-      fourthRetry.error && fourthRetry.error.includes('MAX_RETRIES_EXCEEDED')
+      capAttempt.error && capAttempt.error.includes('MAX_RETRIES_EXCEEDED')
     );
+    results.push({
+      id: 'TEST-08',
+      phase: 'Priority 3: Retry Limit',
+      name: 'Bounded Max Retries (fcm_max_retries=3) Enforcement',
+      category: 'fcm',
+      passed: retryCapEnforced,
+      durationMs: 2,
+      assertionDetail:
+        'Retry attempt on a campaign with retryCount=3 rejected with MAX_RETRIES_EXCEEDED.',
+    });
 
-    const results: TestCaseResult[] = [
-      {
-        id: 'TEST-01',
-        phase: 'Priority 1: Proxy & Rate Limiter',
-        name: 'Cloud Run Trusted Proxy Hop & Spoofed X-Forwarded-For Mitigation',
-        category: 'security',
-        passed: true,
-        durationMs: 3,
-        assertionDetail:
-          'Custom keyGenerator extracts last trusted Cloud Run proxy hop via ipKeyGenerator and ignores client-prepended spoofed IPs.',
-      },
-      {
-        id: 'TEST-02',
-        phase: 'Priority 2: Production Auth Hardening',
-        name: 'Disable X-GoGo-Sandbox-Role & /api/v1/tests/run in Production Mode',
-        category: 'auth',
-        passed: true,
-        durationMs: 4,
-        assertionDetail:
-          'Verified sandbox role headers and test-runner endpoint are strictly blocked when NODE_ENV=production.',
-      },
-      {
-        id: 'TEST-03',
-        phase: 'Priority 2: Token Revocation & Expiry',
-        name: 'Firebase ID Token Verification with checkRevoked=true',
-        category: 'auth',
-        passed: true,
-        durationMs: 5,
-        assertionDetail:
-          'adminAuth.verifyIdToken(token, true) rejects expired, malformed, and revoked Firebase sessions with HTTP 401.',
-      },
-      {
-        id: 'TEST-04',
-        phase: 'Priority 2: Health Endpoint Privacy',
-        name: 'Zero Sensitive Infrastructure Leakage on Public /api/v1/health',
-        category: 'security',
-        passed: true,
-        durationMs: 2,
-        assertionDetail:
-          'Public health endpoint exposes only {status:"ok",timestamp} without project IDs, versions, or database counts.',
-      },
-      {
-        id: 'TEST-05',
-        phase: 'Priority 2: Cross-User & Cross-App Isolation',
-        name: 'Block Unauthorized Device Revocation & Cross-App Phishing DeepLinks',
-        category: 'rbac',
-        passed: phishingBlocked,
-        durationMs: 5,
-        assertionDetail:
-          'Non-owner device deletion returns HTTP 403 and external non-GoGo deepLinks are rejected.',
-      },
-      {
-        id: 'TEST-06',
-        phase: 'Priority 3: Concurrent Idempotency Lock',
-        name: 'Synchronous In-Flight Mutex Prevents Concurrent Duplicate Broadcasts',
-        category: 'idempotency',
-        passed: concurrentSafe,
-        durationMs: 6,
-        assertionDetail:
-          'Parallel Promise.all dispatch with identical idempotencyKey executes once and blocks the concurrent duplicate.',
-      },
-      {
-        id: 'TEST-07',
-        phase: 'Priority 3: Server-Side Preference Enforcement',
-        name: 'Opted-Out Users & Disabled Channels Excluded Server-Side',
-        category: 'fcm',
-        passed: prefSkippedCorrectly,
-        durationMs: 4,
-        assertionDetail:
-          'Disabling user preference records skipped_preference and sends 0 FCM messages to opted-out devices.',
-      },
-      {
-        id: 'TEST-08',
-        phase: 'Priority 3: Retry Limit & Token Cleanup',
-        name: 'Bounded Max Retries (3x) & Expired Token Auto-Pruning',
-        category: 'fcm',
-        passed:
-          retryCapEnforced &&
-          isolatedStore.devices.get('dev_sarkari_stale_06')?.status === 'expired',
-        durationMs: 4,
-        assertionDetail:
-          '4th retry attempt blocked with MAX_RETRIES_EXCEEDED and unregistered tokens transition to expired.',
-      },
-      {
-        id: 'TEST-09',
-        phase: 'Priority 3: Existing Auth & Game Saves',
-        name: 'Guest Users & Firestore Game Saves Preserved Across All 5 Apps',
-        category: 'database',
-        passed: Array.from(isolatedStore.users.values()).every((u) => u.firestoreGameSavePreserved),
-        durationMs: 3,
-        assertionDetail:
-          'Guest and Google Sign-In UIDs map cleanly without modifying existing Arrow Out or Crystal Quest saves.',
-      },
-      {
-        id: 'TEST-10',
-        phase: 'Priority 3 & 4: Zero-Trust Firestore & 10-Table SQL Integrity',
-        name: `Dirty Dozen Payloads (${rulesVerification.total}/12 Blocked) & 10 PostgreSQL Tables`,
-        category: 'security',
-        passed:
-          rulesVerification.passed &&
-          rulesVerification.total === 12 &&
-          isolatedStore.products.size === 5,
-        durationMs: 9,
-        assertionDetail:
-          'All 12 adversarial Firestore payloads verified PERMISSION_DENIED and all 10 PostgreSQL tables validated.',
-      },
-      {
-        id: 'TEST-11',
-        phase: 'Priority 2 & 5: XSS / Injection Sanitization',
-        name: 'Strip <script>, javascript: URIs, and Inline Event Handlers',
-        category: 'security',
-        passed:
-          isolatedStore.sanitizeText('<script>evil()</script><img onerror=alert(1)>Safe') ===
-          'Safe',
-        durationMs: 2,
-        assertionDetail:
-          'Sanitizer strips script tags, event handlers, and angle brackets before storage or FCM dispatch.',
-      },
-    ];
+    // TEST-09: Scheduled campaign dispatcher tick
+    const scheduledNotif = await isolatedStore.dispatchNotification({
+      idempotencyKey: `idem_sched_test_${Date.now()}`,
+      appId: 'sarkari-sarthi',
+      targetType: 'individual',
+      targetValue: 'uid_sarkari_aspirant_01',
+      platform: 'web',
+      title: 'Scheduled Test',
+      body: 'x',
+      deepLink: 'https://gogocompany.in/sarkari-sarthi/',
+      scheduledFor: new Date(Date.now() + 3600_000).toISOString(),
+      authorId: 'uid_admin_root',
+    });
+    const scheduledCampaign = isolatedStore.campaigns.get(scheduledNotif.campaign.notificationId);
+    if (scheduledCampaign) {
+      scheduledCampaign.scheduledFor = new Date(Date.now() - 1000).toISOString();
+    }
+    const dispatchedCount = await isolatedStore.processDueScheduledCampaigns();
+    const scheduledStatus = isolatedStore.campaigns.get(
+      scheduledNotif.campaign.notificationId
+    )?.status;
+    const schedulerWorks =
+      dispatchedCount === 1 && (scheduledStatus === 'delivered' || scheduledStatus === 'partial_failure');
+    results.push({
+      id: 'TEST-09',
+      phase: 'Priority 4: Scheduled Campaign Dispatch',
+      name: 'processDueScheduledCampaigns Dispatches Due Campaigns',
+      category: 'fcm',
+      passed: schedulerWorks,
+      durationMs: 4,
+      assertionDetail: `Scheduler tick dispatched ${dispatchedCount} campaign(s); resulting status=${String(scheduledStatus)}.`,
+    });
+
+    // TEST-10: Transactional backup covers all 10 domain tables
+    const sqlDump = generateTransactionalSqlBackup(isolatedStore);
+    const backupCoversAll = [
+      'users',
+      'registered_applications',
+      'user_app_roles',
+      'device_tokens',
+      'notification_preferences',
+      'notification_campaigns',
+      'notification_deliveries',
+      'audit_logs',
+      'security_events',
+      'system_configs',
+    ].every((t) => sqlDump.includes(`INSERT INTO ${t} `));
+    const backupTransactional = sqlDump.includes('BEGIN;') && sqlDump.includes('COMMIT;');
+    results.push({
+      id: 'TEST-10',
+      phase: 'Priority 5: Backup Coverage',
+      name: 'Transactional SQL Backup Covers 10/10 Domain Tables',
+      category: 'database',
+      passed: backupCoversAll && backupTransactional,
+      durationMs: 5,
+      assertionDetail:
+        'generateTransactionalSqlBackup emits BEGIN...COMMIT and INSERT statements for every domain table including deliveries, audit logs, and security events.',
+    });
+
+    // TEST-11: XSS / injection sanitization
+    const sanitizeOk =
+      isolatedStore.sanitizeText('<script>evil()</script><img onerror=alert(1)>Safe') === 'Safe';
+    results.push({
+      id: 'TEST-11',
+      phase: 'Priority 2 & 5: XSS / Injection Sanitization',
+      name: 'Strip <script>, javascript: URIs, and Inline Event Handlers',
+      category: 'security',
+      passed: sanitizeOk,
+      durationMs: 2,
+      assertionDetail:
+        'Sanitizer strips script tags, event handlers, and angle brackets before storage or FCM dispatch.',
+    });
+
+    // TEST-12: Security event IP hash integrity
+    const evtWithIp = isolatedStore.recordSecurityEvent(
+      'RBAC_VIOLATION',
+      'central-control',
+      'TEST-12',
+      'high',
+      'hash format test',
+      '203.0.113.9'
+    );
+    const evtNoIp = isolatedStore.recordSecurityEvent(
+      'RBAC_VIOLATION',
+      'central-control',
+      'TEST-12',
+      'high',
+      'hash format test'
+    );
+    const ipHashOk =
+      /^sha256:[0-9a-f]{16}$/.test(evtWithIp.actorIpHash) && evtNoIp.actorIpHash === 'unknown';
+    results.push({
+      id: 'TEST-12',
+      phase: 'Priority 5: Telemetry Integrity',
+      name: 'Security Event actorIpHash Is a Real Truncated SHA-256 (Never Random)',
+      category: 'security',
+      passed: ipHashOk,
+      durationMs: 2,
+      assertionDetail:
+        'recordSecurityEvent hashes the provided client IP with SHA-256 and uses "unknown" when no IP is available; no fabricated random hashes.',
+    });
+
+    // TEST-13: Dirty Dozen source-level rule verification
+    const rulesVerification = runSecurityRulesVerification();
+    const dirtyDozenVerified = rulesVerification.passed && rulesVerification.total === 12;
+    results.push({
+      id: 'TEST-13',
+      phase: 'Priority 3 & 4: Zero-Trust Firestore Rules',
+      name: `Dirty Dozen Payloads (${rulesVerification.total}/12 Blocked)`,
+      category: 'security',
+      passed: dirtyDozenVerified,
+      durationMs: 3,
+      assertionDetail:
+        'All 12 adversarial Firestore rule assertions verified against firestore.rules source.',
+    });
 
     const passedCount = results.filter((r) => r.passed).length;
     return {
@@ -1114,3 +1511,10 @@ export class GoGoCentralBackendEngine {
 }
 
 export const backendStore = new GoGoCentralBackendEngine();
+
+// Auto-start the in-process scheduled-campaign dispatcher for single-instance
+// deployments (local Docker / Termux / one Cloud Run instance). Test imports set
+// GOGO_TEST_IMPORT=true and run against isolated engine instances instead.
+if (process.env.GOGO_TEST_IMPORT !== 'true') {
+  backendStore.startScheduler();
+}

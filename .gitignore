@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Backup artifacts are never committed (regenerable; may contain real data)
+backups/
+*.dump

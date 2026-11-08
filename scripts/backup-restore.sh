@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# GoGo Central Backend — PostgreSQL 16 Backup & Recovery Verification Script
+# GoGo Central Backend — PostgreSQL 18 Backup & Recovery Verification Script
 # Usage:
 #   ./scripts/backup-restore.sh backup
 #   ./scripts/backup-restore.sh restore <backup_file.sql.gz>

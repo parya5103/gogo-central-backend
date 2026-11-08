@@ -1,5 +1,5 @@
 -- ============================================================================
--- GoGo Central Backend — PostgreSQL 16 Production & Local Schema Migration
+-- GoGo Central Backend — PostgreSQL 18 Production & Local Schema Migration
 -- File: migrations/001_initial_schema.sql
 -- Covers all 10 core domain tables with strict FK constraints and indexes
 -- ============================================================================

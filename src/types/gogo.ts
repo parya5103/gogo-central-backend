@@ -91,7 +91,13 @@ export interface DeliveryReceiptRecord {
   userId: string;
   appId: string;
   platform: ClientPlatform;
-  status: 'delivered' | 'failed_transient' | 'failed_expired_token' | 'skipped_preference';
+  status:
+    | 'delivered'
+    | 'failed_transient'
+    | 'failed_expired_token'
+    | 'skipped_preference'
+    | 'skipped_quiet_hours'
+    | 'failed_permanent';
   attemptCount: number;
   fcmMessageId: string | null;
   errorCode: string | null;

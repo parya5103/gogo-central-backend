@@ -1,5 +1,15 @@
 # GoGo Central Backend — Project Knowledge Base (`KNOWLEDGE.md`)
 
+## 0. Master Audit State (2026-11-08, v2.0.0)
+
+- **v1.3.0**: an independent master audit of all repository files produced findings SEC-09..SEC-18 (see `SECURITY.md` §1a) covering sandbox-auth defaults, FCM dry-run swallowing, fabricated metrics, CORS misconfig, backup gaps, and in-memory persistence. All security/integrity fixes shipped and CI-verified.
+- **v2.0.0**: the PostgreSQL runtime milestone landed. The Express runtime now serves all state (users, apps, roles, devices, preferences, campaigns, delivery receipts, audit logs, security events, system configs) from PostgreSQL through `src/db/pool.ts` + `src/repositories/*` behind the `GoGoDataStore` interface (`PostgresDataStore` default; `InMemoryDataStore` only behind explicit `GOGO_TEST_IMPORT`/`GOGO_IN_MEMORY_DEMO`). Startup fails closed if the database is unreachable. Migration `002_postgres_runtime.sql` is applied by the checksummed `schema_migrations` runner.
+- **Durable idempotency & worker**: unique `idempotency_key` with atomic INSERT..ON CONFLICT reservation and sha256 payload hash (`409 IDEMPOTENCY_PAYLOAD_MISMATCH` on key reuse with a different payload); `FOR UPDATE SKIP LOCKED` campaign claiming; 5-minute stale-claim recovery; bounded backoff retries; honest at-least-once processing (no exactly-once FCM claims). Quiet hours enforced per-user in validated IANA timezones (marketing campaigns only). Rate limits shared across instances via `rate_limit_buckets`.
+- **Verification evidence**: CI on the feature branch runs the real integration suite `npm run test:pg` (PGT-01..PGT-19 against the PostgreSQL 18 service: migrations, persistence, FK integrity, idempotency races, worker SKIP LOCKED, recovery, retry caps, opt-out/quiet-hours/timezone, SQL-injection parameterization, rate-limit store) plus a disposable-database pg_dump/pg_restore round-trip with row-count comparison. Check the CI check runs on the PR for the authoritative status.
+- **Still open (do not assume fixed)**: Firebase live token/revocation verification and live FCM delivery (no credentials in CI; real sends fail honestly), Docker runtime execution as a live service (image built in CI only), Cloud Run deployment (documented, not provisioned, ₹0 mandate), tsconfig strict enablement, `bun.lock` staleness, Firebase emulator rules tests, `App.tsx` sandbox-header dev fallback (backend gate is the boundary).
+
+---
+
 ## 1. Repository Audit: `parya5103/gogo-central-backend`
 
 ### 1.1 Legacy Architecture Findings

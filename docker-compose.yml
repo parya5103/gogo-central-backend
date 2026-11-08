@@ -1,3 +1,7 @@
+# LOCAL DEVELOPMENT ONLY. This stack is the development/demo runtime
+# (postgres 18 + the API server) with a documented local development password.
+# It is NOT a production deployment configuration; production deployment
+# (Cloud Run, real secret management) is documented separately in README.md.
 services:
   postgres:
     image: postgres:18-alpine
@@ -8,9 +12,16 @@ services:
       POSTGRES_USER: gogo_app_user
       POSTGRES_PASSWORD: local_dev_only_password_change_in_prod
     ports:
-      - "5432:5432"
+      # Loopback binding: reachable from the dev machine (psql, DB GUIs) but
+      # never exposed to the LAN/public interfaces. The backend reaches the
+      # database over the internal Compose network via the service DNS name.
+      - "127.0.0.1:5432:5432"
     volumes:
-      - gogo_pg_data:/var/lib/postgresql/data
+      # postgres:18 images store data in version-specific subdirectories, so
+      # the canonical mount point is /var/lib/postgresql (NOT .../data —
+      # mounting data/ makes postgres 18 refuse to start). See
+      # https://github.com/docker-library/postgres/pull/1259
+      - gogo_pg_data:/var/lib/postgresql
       - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U gogo_app_user -d gogo_central"]
@@ -30,7 +41,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NODE_ENV: development
+      # Production mode: sandbox role headers are always rejected here, and the
+      # diagnostic self-test endpoint is disabled.
+      NODE_ENV: production
       PORT: 3000
       PG_PROVIDER: local
       SQL_HOST: postgres
@@ -39,8 +52,17 @@ services:
       SQL_USER: gogo_app_user
       SQL_PASSWORD: local_dev_only_password_change_in_prod
       CORS_ALLOWED_ORIGINS: "https://gogocompany.in,http://localhost:3000"
+      # Explicit defense-in-depth: sandbox auth headers stay disabled even in
+      # local containers. Set to "true" only for manual sandbox-header testing.
+      GOGO_ENABLE_SANDBOX_AUTH: "false"
+      # FCM_DRY_RUN=true validates FCM requests without delivering pushes.
+      # Requires valid Firebase credentials either way; set to "false" once
+      # real delivery is intended and credentials are configured.
+      FCM_DRY_RUN: "true"
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/v1/health"]
+      # Readiness probe: verifies the HTTP layer AND live PostgreSQL
+      # connectivity (503 while the database is unreachable).
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/v1/health/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
