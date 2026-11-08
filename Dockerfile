@@ -48,8 +48,10 @@ USER gogo
 
 EXPOSE 3000
 
-# Container healthcheck probing versioned health endpoint
+# Container healthcheck probing the readiness endpoint (HTTP + PostgreSQL
+# connectivity). Liveness (/api/v1/health/live) stays process-only so a brief
+# database outage does not kill a healthy instance.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/v1/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/v1/health/ready || exit 1
 
 CMD ["node", "--import", "tsx", "server.ts"]

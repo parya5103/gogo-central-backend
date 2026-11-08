@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, 'fix/**', 'feat/**']
 
 jobs:
   validate-and-test:
@@ -56,11 +56,72 @@ jobs:
       - name: Run Security Audit & HTTP Regression Test Suite
         run: set -o pipefail && npm test 2>&1 | tee /tmp/test.log
 
+      - name: PostgreSQL Integration Tests (real database, no mocks)
+        env:
+          SQL_HOST: 127.0.0.1
+          SQL_PORT: '5432'
+          SQL_DB_NAME: gogo_central
+          SQL_USER: gogo_app_user
+          SQL_PASSWORD: ci_test_password
+          FCM_DRY_RUN: 'true'
+        run: set -o pipefail && npm run test:pg 2>&1 | tee /tmp/testpg.log
+
       - name: Build Production Frontend Bundle
         run: set -o pipefail && npm run build 2>&1 | tee /tmp/build.log
 
       - name: Validate Multi-Stage Non-Root Docker Build
         run: set -o pipefail && docker build -t gogo-central-backend:ci-test . 2>&1 | tee /tmp/docker.log
+
+      # Phase 8 requirement: a backup is only verified once it has been
+      # restored into a SEPARATE disposable PostgreSQL database. This dumps the
+      # CI integration database (pg_dump custom format), restores it into a
+      # throwaway container, and compares row counts. Never production data.
+      - name: Backup & Disposable-Database Restore Verification (pg_dump/pg_restore)
+        run: |
+          set -euo pipefail
+          mkdir -p backups
+          # 1. Custom-format backup of the CI database.
+          docker run --rm --network host -e PGPASSWORD=ci_test_password -v "$PWD/backups:/backups" postgres:18-alpine \
+            pg_dump -h 127.0.0.1 -U gogo_app_user -d gogo_central -Fc -f /backups/ci-backup.dump
+          echo "pg_dump completed: $(du -h backups/ci-backup.dump | cut -f1)"
+          # 2. Disposable restore target (isolated container network).
+          docker network create ci-pgnet
+          docker run -d --name ci-restore --network ci-pgnet \
+            -e POSTGRES_DB=gogo_restore -e POSTGRES_USER=restore_user -e POSTGRES_PASSWORD=restore_pass \
+            postgres:18-alpine
+          for i in $(seq 1 30); do
+            if docker exec ci-restore pg_isready -U restore_user -d gogo_restore > /dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          # 3. Restore the backup into the disposable database.
+          docker run --rm --network ci-pgnet -e PGPASSWORD=restore_pass -v "$PWD/backups:/backups" postgres:18-alpine \
+            pg_restore -h ci-restore -U restore_user -d gogo_restore --no-owner /backups/ci-backup.dump
+          # 4. Verify restored schema and row counts match the source.
+          COUNT_SQL="SELECT (SELECT COUNT(*) FROM users) || '/' || (SELECT COUNT(*) FROM registered_applications) || '/' || (SELECT COUNT(*) FROM notification_campaigns) || '/' || (SELECT COUNT(*) FROM schema_migrations);"
+          SRC=$(docker run --rm --network host -e PGPASSWORD=ci_test_password postgres:18-alpine \
+            psql -h 127.0.0.1 -U gogo_app_user -d gogo_central -t -A -c "$COUNT_SQL")
+          DST=$(docker exec -e PGPASSWORD=restore_pass ci-restore \
+            psql -U restore_user -d gogo_restore -t -A -c "$COUNT_SQL")
+          echo "Source counts (users/apps/campaigns/migrations): $SRC"
+          echo "Restored counts: $DST"
+          if [ "$SRC" != "$DST" ]; then
+            echo "FAIL: restored row counts do not match source database"
+            exit 1
+          fi
+          IDX=$(docker exec -e PGPASSWORD=restore_pass ci-restore \
+            psql -U restore_user -d gogo_restore -t -A -c \
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'notification_campaigns' AND indexname = 'idx_campaigns_worker_queue'")
+          if [ -z "$IDX" ]; then
+            echo "FAIL: worker queue index missing after restore"
+            exit 1
+          fi
+          echo "Restored index verified: $IDX"
+          # 5. Never commit backups: verify .gitignore covers the directory.
+          grep -qE '^/?backups/?$|^backups' .gitignore || echo "backups/" >> .gitignore
+          rm -rf backups/ci-backup.dump
+          docker rm -f ci-restore > /dev/null
+          docker network rm ci-pgnet > /dev/null
+          echo "Backup/restore verification PASSED."
 
       # Diagnostic: on any step failure, post captured logs as a PR comment so
       # failures are readable from clients without Actions log access.
@@ -70,7 +131,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'build', 'docker'];
+            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'testpg', 'build', 'docker'];
             let body = 'CI failed. Captured step output:\n';
             for (const name of logs) {
               try {
