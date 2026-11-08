@@ -1,0 +1,449 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public/non-sensitive user metadata linked by Firebase UID across all GoGo products.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the user.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "description": "RBAC role in GoGo ecosystem.",
+          "enum": ["user", "admin"],
+          "maxLength": 16
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of user registration."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last profile update."
+        }
+      },
+      "required": ["uid", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted administrator lookup collection used by Zero-Trust ABAC rules.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Admin Firebase UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "grantedBy": {
+          "type": "string",
+          "description": "UID of admin who granted privileges.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin access was granted."
+        }
+      },
+      "required": ["uid", "grantedBy", "createdAt"]
+    },
+    "GoGoApp": {
+      "title": "GoGoApp",
+      "description": "App-level configuration and isolation boundaries for each GoGo product.",
+      "type": "object",
+      "properties": {
+        "appId": {
+          "type": "string",
+          "description": "Unique slug for the GoGo product.",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable name of the product.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "domain": {
+          "type": "string",
+          "description": "Allowed CORS origin domain.",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "description": "Product vertical classification.",
+          "enum": ["portal", "civic", "news", "game"],
+          "maxLength": 24
+        },
+        "fcmEnabled": {
+          "type": "boolean",
+          "description": "Whether FCM notifications are active for this product."
+        },
+        "webPushEnabled": {
+          "type": "boolean",
+          "description": "Whether Web Push VAPID delivery is enabled."
+        },
+        "androidEnabled": {
+          "type": "boolean",
+          "description": "Whether Android native FCM topic/token delivery is enabled."
+        },
+        "rateLimitPerMin": {
+          "type": "number",
+          "description": "Maximum API requests per minute per IP."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last configuration change."
+        }
+      },
+      "required": ["appId", "name", "domain", "category", "fcmEnabled", "webPushEnabled", "androidEnabled", "rateLimitPerMin", "createdAt", "updatedAt"]
+    },
+    "DeviceRegistration": {
+      "title": "DeviceRegistration",
+      "description": "FCM Web Push or Android device token bound to a specific user and GoGo product.",
+      "type": "object",
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "description": "Deterministic or random registration ID.",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "appId": {
+          "type": "string",
+          "description": "Target GoGo product ID.",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fcmToken": {
+          "type": "string",
+          "description": "FCM registration token.",
+          "minLength": 16,
+          "maxLength": 512
+        },
+        "platform": {
+          "type": "string",
+          "description": "Target client platform.",
+          "enum": ["web", "android"],
+          "maxLength": 16
+        },
+        "userAgent": {
+          "type": "string",
+          "description": "Client browser or Android OS version.",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "status": {
+          "type": "string",
+          "description": "Token validity status.",
+          "enum": ["active", "revoked", "expired"],
+          "maxLength": 16
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of registration."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last heartbeat or status change."
+        }
+      },
+      "required": ["deviceId", "userId", "appId", "fcmToken", "platform", "userAgent", "status", "createdAt", "updatedAt"]
+    },
+    "NotificationPreference": {
+      "title": "NotificationPreference",
+      "description": "Per-user and per-app notification preferences ensuring opt-in/opt-out isolation.",
+      "type": "object",
+      "properties": {
+        "prefId": {
+          "type": "string",
+          "description": "Composite key {userId}_{appId}.",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "appId": {
+          "type": "string",
+          "description": "GoGo product slug.",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Master switch for this GoGo app."
+        },
+        "webPush": {
+          "type": "boolean",
+          "description": "Allow web push notifications."
+        },
+        "androidPush": {
+          "type": "boolean",
+          "description": "Allow Android app push notifications."
+        },
+        "marketingAlerts": {
+          "type": "boolean",
+          "description": "Allow promotional/broadcast updates."
+        },
+        "transactionalAlerts": {
+          "type": "boolean",
+          "description": "Allow critical alerts (exam dates, game saves, breaking news)."
+        },
+        "quietHoursStart": {
+          "type": "string",
+          "description": "24h start time for quiet hours (e.g. 22:00).",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "quietHoursEnd": {
+          "type": "string",
+          "description": "24h end time for quiet hours (e.g. 07:00).",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of initial preference creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest update."
+        }
+      },
+      "required": ["prefId", "userId", "appId", "enabled", "webPush", "androidPush", "marketingAlerts", "transactionalAlerts", "quietHoursStart", "quietHoursEnd", "createdAt", "updatedAt"]
+    },
+    "NotificationCampaign": {
+      "title": "NotificationCampaign",
+      "description": "Admin broadcast or targeted FCM notification record with duplicate prevention and delivery stats.",
+      "type": "object",
+      "properties": {
+        "notificationId": {
+          "type": "string",
+          "description": "Unique notification ID.",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "description": "Deduplication key to prevent duplicate sends.",
+          "minLength": 6,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "appId": {
+          "type": "string",
+          "description": "Target GoGo product slug.",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "targetType": {
+          "type": "string",
+          "description": "Audience scope (broadcast, topic, or targeted UID).",
+          "enum": ["broadcast", "targeted", "topic"],
+          "maxLength": 16
+        },
+        "targetValue": {
+          "type": "string",
+          "description": "All users ('all'), topic slug, or specific Firebase UID.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "platform": {
+          "type": "string",
+          "description": "Target platform filter.",
+          "enum": ["all", "web", "android"],
+          "maxLength": 16
+        },
+        "title": {
+          "type": "string",
+          "description": "Notification headline.",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "body": {
+          "type": "string",
+          "description": "Notification message body.",
+          "minLength": 2,
+          "maxLength": 500
+        },
+        "deepLink": {
+          "type": "string",
+          "description": "Destination URL when clicked.",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "status": {
+          "type": "string",
+          "description": "Dispatch lifecycle status.",
+          "enum": ["queued", "processing", "delivered", "partial_failure", "failed"],
+          "maxLength": 24
+        },
+        "sentCount": {
+          "type": "number",
+          "description": "Number of successfully delivered FCM messages."
+        },
+        "failedCount": {
+          "type": "number",
+          "description": "Number of failed FCM deliveries."
+        },
+        "retryCount": {
+          "type": "number",
+          "description": "Number of retry attempts executed."
+        },
+        "authorId": {
+          "type": "string",
+          "description": "Admin UID who dispatched the notification.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of dispatch."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest status update."
+        }
+      },
+      "required": ["notificationId", "idempotencyKey", "appId", "targetType", "targetValue", "platform", "title", "body", "deepLink", "status", "sentCount", "failedCount", "retryCount", "authorId", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable security audit log entry recording sensitive user and admin actions.",
+      "type": "object",
+      "properties": {
+        "logId": {
+          "type": "string",
+          "description": "Unique audit log entry ID.",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "actorId": {
+          "type": "string",
+          "description": "Firebase UID of the user/admin performing the action.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "appId": {
+          "type": "string",
+          "description": "Associated GoGo product ID or 'central-control'.",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "action": {
+          "type": "string",
+          "description": "Action identifier (e.g. NOTIFICATION_DISPATCH, TOKEN_REGISTER, CONFIG_UPDATE).",
+          "minLength": 2,
+          "maxLength": 64
+        },
+        "resourceId": {
+          "type": "string",
+          "description": "ID of affected entity.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "severity": {
+          "type": "string",
+          "description": "Security criticality level.",
+          "enum": ["info", "warn", "critical"],
+          "maxLength": 16
+        },
+        "details": {
+          "type": "string",
+          "description": "Sanitized human-readable summary of the event.",
+          "minLength": 2,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of audit event."
+        }
+      },
+      "required": ["logId", "actorId", "appId", "action", "resourceId", "severity", "details", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profiles keyed by Firebase Auth UID."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Admin role directory keyed by Firebase Auth UID."
+    },
+    "/apps/{appId}": {
+      "schema": { "$ref": "#/entities/GoGoApp" },
+      "description": "GoGo product configurations (gogocompany-in, sarkari-sarthi, pika-news, arrow-out, crystal-quest)."
+    },
+    "/devices/{deviceId}": {
+      "schema": { "$ref": "#/entities/DeviceRegistration" },
+      "description": "Registered FCM Web Push and Android tokens isolated by userId and appId."
+    },
+    "/preferences/{prefId}": {
+      "schema": { "$ref": "#/entities/NotificationPreference" },
+      "description": "Per-user, per-app notification preferences."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/NotificationCampaign" },
+      "description": "Central FCM broadcast and targeted notification campaigns."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable security and operational audit trail."
+    }
+  }
+}

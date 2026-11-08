@@ -1,0 +1,58 @@
+name: GoGo Central Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-and-test:
+    name: TypeScript Strict, Security Rules & Automated Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: gogo_central
+          POSTGRES_USER: gogo_app_user
+          POSTGRES_PASSWORD: ci_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint Firestore Zero-Trust Security Rules
+        run: npx eslint firestore.rules
+
+      - name: TypeScript Strict Mode Verification
+        run: npm run lint
+
+      - name: Verify PostgreSQL 10-Table Schema & Backup Script
+        run: bash ./scripts/backup-restore.sh verify-schema
+
+      - name: Run Security Audit & HTTP Regression Test Suite
+        run: npm test
+
+      - name: Build Production Frontend Bundle
+        run: npm run build
+
+      - name: Validate Multi-Stage Non-Root Docker Build
+        run: docker build -t gogo-central-backend:ci-test .

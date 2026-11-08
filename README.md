@@ -1,11 +1,116 @@
-<div align="center">
+# GoGo Central Backend (`parya5103/gogo-central-backend`)
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+A secure, centralized, multi-product backend and Firebase Cloud Messaging (FCM) control plane serving the entire **GoGo Company** ecosystem at **₹0 local development cost**:
 
-  <h1>Built with AI Studio</h2>
+1. **GoGo Company** — `https://gogocompany.in/` (`gogocompany-in`)
+2. **Sarkari Sarthi** — `https://gogocompany.in/sarkari-sarthi/` (`sarkari-sarthi`)
+3. **Pika News** — `https://gogocompany.in/pikanews/` (`pika-news`)
+4. **Arrow Out** — `https://gogocompany.in/arrowout/` (`arrow-out`)
+5. **Crystal Quest** — `https://gogocompany.in/crystalquest/` (`crystal-quest`)
+6. **Future GoGo Products** — Dynamically onboarded via `POST /api/v1/apps` without rebuilding the backend.
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+---
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## 1. Quick Start — Desktop / Laptop (Docker Compose + PostgreSQL 18 at ₹0)
 
-</div>
+### Prerequisites
+- Docker & Docker Compose v2+
+- Node.js 22+ (optional for running host-side CLI scripts)
+
+### Commands
+```bash
+# 1. Copy environment template
+cp .env.example .env
+
+# 2. Start PostgreSQL 18 (postgres:18-alpine) + GoGo Central Backend
+docker compose up --build
+
+# 3. Verify health check & run 10-point security regression suite
+curl http://localhost:3000/api/v1/health
+npm test
+```
+
+---
+
+## 2. Complete Android / Termux Local Setup Guide (₹0 Cost)
+
+### 2.1 Understanding Docker Limitations on Android / Termux
+- **Why Standard Docker Fails on Unrooted Android**: Docker Engine (`dockerd`) and `docker compose` require Linux kernel namespaces (`USER_NS`, `PID_NS`, `NET_NS`), `cgroups v2`, and `overlayfs` mounts that are disabled in stock, unrooted Android OEM kernels. Attempting `docker run` or `docker compose up` directly in standard Termux will fail with `cgroups: cannot find cgroup mount destination` or permission errors.
+- **Recommended Solution on Unrooted Android**: Run **native Termux `postgresql` + `nodejs-lts`** directly in user space! Both PostgreSQL and Node.js compile natively for `aarch64` (ARM64) in Termux and run at full native speed with **zero root access and ₹0 cost**.
+- *(Optional QEMU Workaround)*: If you strictly need to test `Dockerfile` builds on an unrooted Android phone, you must boot an Alpine Linux x86_64/ARM64 virtual machine inside `qemu-system-aarch64` (`pkg install qemu-system-aarch64-headless`), which carries a ~4x CPU/RAM overhead. Therefore, native Termux PostgreSQL is strongly preferred for daily coding.
+
+### 2.2 Step-by-Step Native Termux Setup (Unrooted Android)
+
+```bash
+# Step 1: Update Termux packages and install Node.js LTS, PostgreSQL, and Git
+pkg update && pkg upgrade -y
+pkg install -y nodejs-lts postgresql git bash
+
+# Step 2: Initialize and start the local Termux PostgreSQL cluster
+mkdir -p $PREFIX/var/lib/postgresql
+initdb -D $PREFIX/var/lib/postgresql
+pg_ctl -D $PREFIX/var/lib/postgresql -l $PREFIX/var/lib/postgresql/logfile start
+
+# Step 3: Create the GoGo database user and database
+createuser -s gogo_app_user || true
+createdb -O gogo_app_user gogo_central || true
+
+# Step 4: Clone repository and install dependencies
+git clone https://github.com/parya5103/gogo-central-backend.git
+cd gogo-central-backend
+npm install
+
+# Step 5: Apply the 10-table PostgreSQL schema migration
+psql -U gogo_app_user -d gogo_central -f migrations/001_initial_schema.sql
+
+# Step 6: Verify schema, run security tests, and start the server on port 3000
+npm run db:verify
+npm test
+npm run dev
+```
+Open `http://127.0.0.1:3000` in your Android browser (Chrome / Brave / Firefox) to use the full Admin Control Plane locally!
+
+---
+
+## 3. Database Migration, Backup & Restore Commands
+
+The repository provides both a cross-platform Node.js CLI (`scripts/db-manager.ts`) and a native `pg_dump`/`psql` shell script (`scripts/backup-restore.sh`):
+
+```bash
+# 1. Verify all 10 PostgreSQL tables, indexes, and foreign keys + active PG_PROVIDER
+npm run db:verify
+
+# 2. Generate a transactional SQL backup dump (backups/gogo_central_latest.sql)
+npm run db:backup
+
+# 3. Verify and restore from the transactional SQL backup dump
+npm run db:restore
+
+# 4. Native pg_dump / psql compressed backup & single-transaction restore (when pg_dump is installed)
+bash ./scripts/backup-restore.sh backup
+bash ./scripts/backup-restore.sh restore ./backups/gogo_central_<TIMESTAMP>.sql.gz
+```
+
+---
+
+## 4. Provider-Independent PostgreSQL Configuration (`src/db/postgres-config.ts`)
+
+Switch PostgreSQL providers purely via environment variables without changing any backend code:
+
+| Provider Mode (`PG_PROVIDER`) | Target Environment | Required Variables | Cost Tier |
+| :--- | :--- | :--- | :--- |
+| `PG_PROVIDER="local"` | Local Docker Compose (`postgres:18-alpine`) or Android Termux | `SQL_HOST=127.0.0.1`, `SQL_PORT=5432`, `SQL_DB_NAME=gogo_central`, `SQL_USER=gogo_app_user` | **₹0 / month** |
+| `PG_PROVIDER="neon"` | Neon Serverless PostgreSQL (Cloud Free Tier) | `SQL_HOST=ep-*.neon.tech`, `SQL_DB_NAME=gogo_central`, `SQL_USER=...`, `SQL_PASSWORD=...` (TLS enabled automatically) | **₹0 / month** (within 0.5 GB & 100 CU-hrs/mo) |
+| `PG_PROVIDER="cloudsql"` | Google Cloud SQL for PostgreSQL 18 | `SQL_HOST=/cloudsql/PROJECT:REGION:INSTANCE`, `SQL_DB_NAME=gogo_central`, `SQL_USER=...`, `SQL_PASSWORD=...` | Paid (`~₹1,204/mo`) unless Starter Tier eligible |
+
+---
+
+## 5. Readiness Matrix: Local vs. Cloud Hosting vs. Live Website Integration
+
+| Capability | Works Locally Now (₹0) | Requires Cloud Hosting (Cloud Run + DB) | Required Before Connecting Live GoGo Websites |
+| :--- | :--- | :--- | :--- |
+| **10-Table PostgreSQL Schema & Migrations** | Yes (`docker-compose.yml` / Termux) | Cloud SQL or Neon Free Tier for 24/7 internet reachability | Apply `001_initial_schema.sql` to production DB |
+| **Firebase ID Token Verification (`verifyIdToken`)** | Yes (`checkRevoked = true`) | Same Firebase project (`gen-lang-client-0566323659`) | Ensure all 5 websites use the shared Firebase project ID |
+| **FCM Notification Engine & Idempotency** | Yes (Deduplication, retries, token lifecycle) | Public HTTPS URL for webhook/background workers | Add Web Push `firebase-messaging-sw.js` + VAPID key on each site |
+| **Admin Dashboard & RBAC Security** | Yes (`http://localhost:3000`) | Cloud Run HTTPS URL (`--min-instances=0`) | Configure `CORS_ALLOWED_ORIGINS` for `https://gogocompany.in` |
+| **Backup & Transactional Restore** | Yes (`npm run db:backup` / `db:restore`) | Automated daily cron or Cloud SQL backups | Verify initial backup before onboarding live traffic |

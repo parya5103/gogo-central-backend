@@ -1,0 +1,6 @@
+{
+  "name": "GoGo Central Backend & FCM Control Plane",
+  "description": "Shared multi-product backend, FCM notification hub, security audit log, and admin control plane for GoGo Company products.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

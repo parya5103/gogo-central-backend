@@ -1,0 +1,289 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'aaryapratik@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Blueprint Validation Helpers (Verbatim synced with firebase-blueprint.json)
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'role', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        data.role is string && data.role.size() <= 16 && (data.role == 'user' || data.role == 'admin') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'grantedBy', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'grantedBy', 'createdAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.grantedBy is string && data.grantedBy.size() >= 1 && data.grantedBy.size() <= 128 && data.grantedBy.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidGoGoApp(data) {
+      return data.keys().hasAll(['appId', 'name', 'domain', 'category', 'fcmEnabled', 'webPushEnabled', 'androidEnabled', 'rateLimitPerMin', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['appId', 'name', 'domain', 'category', 'fcmEnabled', 'webPushEnabled', 'androidEnabled', 'rateLimitPerMin', 'createdAt', 'updatedAt']) &&
+        data.appId is string && data.appId.size() >= 2 && data.appId.size() <= 64 && data.appId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 80 &&
+        data.domain is string && data.domain.size() >= 3 && data.domain.size() <= 120 &&
+        data.category is string && data.category.size() <= 24 && (data.category == 'portal' || data.category == 'civic' || data.category == 'news' || data.category == 'game') &&
+        data.fcmEnabled is bool &&
+        data.webPushEnabled is bool &&
+        data.androidEnabled is bool &&
+        data.rateLimitPerMin is number && data.rateLimitPerMin >= 10 && data.rateLimitPerMin <= 10000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDeviceRegistration(data) {
+      return data.keys().hasAll(['deviceId', 'userId', 'appId', 'fcmToken', 'platform', 'userAgent', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['deviceId', 'userId', 'appId', 'fcmToken', 'platform', 'userAgent', 'status', 'createdAt', 'updatedAt']) &&
+        data.deviceId is string && data.deviceId.size() >= 2 && data.deviceId.size() <= 128 && data.deviceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.appId is string && data.appId.size() >= 2 && data.appId.size() <= 64 && data.appId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.fcmToken is string && data.fcmToken.size() >= 16 && data.fcmToken.size() <= 512 &&
+        data.platform is string && data.platform.size() <= 16 && (data.platform == 'web' || data.platform == 'android') &&
+        data.userAgent is string && data.userAgent.size() >= 1 && data.userAgent.size() <= 256 &&
+        data.status is string && data.status.size() <= 16 && (data.status == 'active' || data.status == 'revoked' || data.status == 'expired') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationPreference(data) {
+      return data.keys().hasAll(['prefId', 'userId', 'appId', 'enabled', 'webPush', 'androidPush', 'marketingAlerts', 'transactionalAlerts', 'quietHoursStart', 'quietHoursEnd', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['prefId', 'userId', 'appId', 'enabled', 'webPush', 'androidPush', 'marketingAlerts', 'transactionalAlerts', 'quietHoursStart', 'quietHoursEnd', 'createdAt', 'updatedAt']) &&
+        data.prefId is string && data.prefId.size() >= 3 && data.prefId.size() <= 128 && data.prefId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.appId is string && data.appId.size() >= 2 && data.appId.size() <= 64 && data.appId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.enabled is bool &&
+        data.webPush is bool &&
+        data.androidPush is bool &&
+        data.marketingAlerts is bool &&
+        data.transactionalAlerts is bool &&
+        data.quietHoursStart is string && data.quietHoursStart.size() == 5 &&
+        data.quietHoursEnd is string && data.quietHoursEnd.size() == 5 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationCampaign(data) {
+      return data.keys().hasAll(['notificationId', 'idempotencyKey', 'appId', 'targetType', 'targetValue', 'platform', 'title', 'body', 'deepLink', 'status', 'sentCount', 'failedCount', 'retryCount', 'authorId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['notificationId', 'idempotencyKey', 'appId', 'targetType', 'targetValue', 'platform', 'title', 'body', 'deepLink', 'status', 'sentCount', 'failedCount', 'retryCount', 'authorId', 'createdAt', 'updatedAt']) &&
+        data.notificationId is string && data.notificationId.size() >= 2 && data.notificationId.size() <= 128 && data.notificationId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.idempotencyKey is string && data.idempotencyKey.size() >= 6 && data.idempotencyKey.size() <= 128 && data.idempotencyKey.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.appId is string && data.appId.size() >= 2 && data.appId.size() <= 64 && data.appId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.targetType is string && data.targetType.size() <= 16 && (data.targetType == 'broadcast' || data.targetType == 'targeted' || data.targetType == 'topic') &&
+        data.targetValue is string && data.targetValue.size() >= 1 && data.targetValue.size() <= 128 &&
+        data.platform is string && data.platform.size() <= 16 && (data.platform == 'all' || data.platform == 'web' || data.platform == 'android') &&
+        data.title is string && data.title.size() >= 2 && data.title.size() <= 120 &&
+        data.body is string && data.body.size() >= 2 && data.body.size() <= 500 &&
+        data.deepLink is string && data.deepLink.size() >= 1 && data.deepLink.size() <= 256 &&
+        data.status is string && data.status.size() <= 24 && (data.status == 'queued' || data.status == 'processing' || data.status == 'delivered' || data.status == 'partial_failure' || data.status == 'failed') &&
+        data.sentCount is number && data.sentCount >= 0 &&
+        data.failedCount is number && data.failedCount >= 0 &&
+        data.retryCount is number && data.retryCount >= 0 && data.retryCount <= 10 &&
+        data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 && data.authorId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['logId', 'actorId', 'appId', 'action', 'resourceId', 'severity', 'details', 'createdAt']) &&
+        data.keys().hasOnly(['logId', 'actorId', 'appId', 'action', 'resourceId', 'severity', 'details', 'createdAt']) &&
+        data.logId is string && data.logId.size() >= 2 && data.logId.size() <= 128 && data.logId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.actorId is string && data.actorId.size() >= 1 && data.actorId.size() <= 128 && data.actorId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.appId is string && data.appId.size() >= 2 && data.appId.size() <= 64 && data.appId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.action is string && data.action.size() >= 2 && data.action.size() <= 64 &&
+        data.resourceId is string && data.resourceId.size() >= 1 && data.resourceId.size() <= 128 &&
+        data.severity is string && data.severity.size() <= 16 && (data.severity == 'info' || data.severity == 'warn' || data.severity == 'critical') &&
+        data.details is string && data.details.size() >= 2 && data.details.size() <= 500 &&
+        data.createdAt is timestamp;
+    }
+
+    // 1. User Profiles (/users/{userId})
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isVerifiedUser() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == userId &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (incoming().role == 'user' || isAdmin());
+      allow update: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (isOwner(userId) && incoming().role == existing().role && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])) ||
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // 2. Admin Directory (/admins/{adminId})
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isAdmin() && resource.data.uid is string;
+      allow create: if isAdmin() &&
+        isValidId(adminId) &&
+        isValidAdminRecord(incoming()) &&
+        incoming().uid == adminId &&
+        incoming().grantedBy == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(adminId) && isAdmin();
+    }
+
+    // 3. GoGo Product Catalog (/apps/{appId})
+    match /apps/{appId} {
+      allow get: if isValidId(appId) && isVerifiedUser();
+      allow list: if isVerifiedUser() && resource.data.appId is string;
+      allow create: if isAdmin() &&
+        isValidId(appId) &&
+        isValidGoGoApp(incoming()) &&
+        incoming().appId == appId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() &&
+        isValidId(appId) &&
+        isValidGoGoApp(incoming()) &&
+        incoming().appId == existing().appId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'domain', 'category', 'fcmEnabled', 'webPushEnabled', 'androidEnabled', 'rateLimitPerMin', 'updatedAt']);
+      allow delete: if isValidId(appId) && isAdmin();
+    }
+
+    // 4. Device Token Registrations (/devices/{deviceId})
+    match /devices/{deviceId} {
+      allow get: if isValidId(deviceId) && (isOwner(existing().userId) || isAdmin());
+      allow list: if isVerifiedUser() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() &&
+        isValidId(deviceId) &&
+        isValidDeviceRegistration(incoming()) &&
+        incoming().deviceId == deviceId &&
+        incoming().userId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/apps/$(incoming().appId));
+      allow update: if isVerifiedUser() &&
+        isValidId(deviceId) &&
+        isValidDeviceRegistration(incoming()) &&
+        incoming().deviceId == existing().deviceId &&
+        incoming().userId == existing().userId &&
+        incoming().appId == existing().appId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (isOwner(existing().userId) && incoming().diff(existing()).affectedKeys().hasOnly(['fcmToken', 'userAgent', 'status', 'updatedAt'])) ||
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+      allow delete: if isValidId(deviceId) && (isOwner(existing().userId) || isAdmin());
+    }
+
+    // 5. Notification Preferences (/preferences/{prefId})
+    match /preferences/{prefId} {
+      allow get: if isValidId(prefId) && (isOwner(existing().userId) || isAdmin());
+      allow list: if isVerifiedUser() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() &&
+        isValidId(prefId) &&
+        isValidNotificationPreference(incoming()) &&
+        incoming().prefId == prefId &&
+        incoming().userId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/apps/$(incoming().appId));
+      allow update: if isVerifiedUser() &&
+        isValidId(prefId) &&
+        isValidNotificationPreference(incoming()) &&
+        incoming().prefId == existing().prefId &&
+        incoming().userId == existing().userId &&
+        incoming().appId == existing().appId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (isOwner(existing().userId) || isAdmin()) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['enabled', 'webPush', 'androidPush', 'marketingAlerts', 'transactionalAlerts', 'quietHoursStart', 'quietHoursEnd', 'updatedAt']);
+      allow delete: if isValidId(prefId) && (isOwner(existing().userId) || isAdmin());
+    }
+
+    // 6. FCM Notification Campaigns (/notifications/{notificationId})
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && isVerifiedUser() && (existing().targetType == 'broadcast' || existing().targetValue == request.auth.uid || isAdmin());
+      allow list: if isVerifiedUser() && (resource.data.targetType == 'broadcast' || resource.data.targetValue == request.auth.uid || isAdmin());
+      allow create: if isAdmin() &&
+        isValidId(notificationId) &&
+        isValidNotificationCampaign(incoming()) &&
+        incoming().notificationId == notificationId &&
+        incoming().authorId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/apps/$(incoming().appId));
+      allow update: if isAdmin() &&
+        isValidId(notificationId) &&
+        isValidNotificationCampaign(incoming()) &&
+        incoming().notificationId == existing().notificationId &&
+        incoming().idempotencyKey == existing().idempotencyKey &&
+        incoming().appId == existing().appId &&
+        incoming().authorId == existing().authorId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'sentCount', 'failedCount', 'retryCount', 'updatedAt']);
+      allow delete: if isValidId(notificationId) && isAdmin();
+    }
+
+    // 7. Immutable Security Audit Logs (/auditLogs/{logId})
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isAdmin() && resource.data.logId is string;
+      allow create: if isVerifiedUser() &&
+        isValidId(logId) &&
+        isValidAuditLog(incoming()) &&
+        incoming().logId == logId &&
+        incoming().actorId == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# Prevent secrets, git history, and local artifacts from entering Docker build context
+.git
+.gitignore
+.github
+.env
+.env.*
+!.env.example
+node_modules
+dist
+coverage
+*.log
+npm-debug.log*
+.DS_Store
+DRAFT_firestore.rules
