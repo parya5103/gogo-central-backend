@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * GoGo Central Backend — PostgreSQL Integration Tests (PGT-01..PGT-19)
+ * GoGo Central Backend — PostgreSQL Integration Tests (PGT-01..PGT-22)
  *
  * REAL database tests, no mocks and no SQLite substitutes. Runs against a
  * disposable PostgreSQL instance configured via SQL_* environment variables
@@ -42,6 +42,10 @@ import { PostgresDataStore } from '../src/server/postgres-store.ts';
 import { PostgresRateLimitStore } from '../src/server/rate-limit-pg.ts';
 import { NotificationWorker } from '../src/server/notification-worker.ts';
 import { isInQuietHours, isValidIANATimezone } from '../src/server/campaign-rules.ts';
+import { mapFirebaseSignInProvider } from '../src/server/auth-provider.ts';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const RUN = `pgt_${Date.now().toString(36)}`;
 const TEST_APP = 'sarkari-sarthi'; // seeded by migration 001
@@ -119,8 +123,11 @@ async function main(): Promise<void> {
   // Fresh CI databases start empty; on a reused disposable DB migrations are
   // skipped, which PGT-02 also proves. Both paths are valid PASS states.
 
-  await test('PGT-01', 'Fresh migration applies 001 + 002 with checksum tracking', async () => {
-    const report = await runMigrations();
+  await test('PGT-01', 'Fresh migration applies 001 + 002 with checksum tracking (advisory-lock serialized)', async () => {
+    // Two concurrent runners must serialize on the advisory lock: each
+    // migration is applied at most once, the second runner skips what the
+    // first applied, and neither corrupts schema_migrations.
+    const [reportA, reportB] = await Promise.all([runMigrations(), runMigrations()]);
     const applied = await listAppliedMigrations();
     assertEqual(applied.length, 2, 'both migrations tracked in schema_migrations');
     assert(applied.some((m) => m.version === '001'), '001 recorded');
@@ -129,7 +136,16 @@ async function main(): Promise<void> {
       applied.every((m) => /^[a-f0-9]{64}$/.test(m.checksum)),
       'checksums are sha256 hex'
     );
-    void report;
+    for (const version of ['001', '002']) {
+      const appliedCount = [reportA, reportB].filter((r) => r.applied.includes(version)).length;
+      const skippedCount = [reportA, reportB].filter((r) => r.skipped.includes(version)).length;
+      assertEqual(
+        appliedCount + skippedCount,
+        2,
+        `advisory lock serialized the concurrent runners for ${version}`
+      );
+      assert(appliedCount <= 1, `${version} applied at most once across concurrent runners`);
+    }
   });
 
   await test('PGT-02', 'Repeated migration is a safe no-op (idempotent runner)', async () => {
@@ -760,6 +776,120 @@ async function main(): Promise<void> {
   await test('PGT-19', 'Health check verifies real PostgreSQL connectivity', async () => {
     assertEqual(await checkDatabaseHealth(), true, 'checkDatabaseHealth true');
     assertEqual(await store.checkHealth(), true, 'store.checkHealth true');
+  });
+
+  await test('PGT-20', 'Checksum mismatch on an applied migration blocks startup', async () => {
+    // Tamper with the RECORDED checksum (the migration file itself is never
+    // edited once applied). Startup must abort loudly, then succeed again
+    // once the recorded checksum is restored.
+    await query("UPDATE schema_migrations SET checksum = $1 WHERE version = '002'", [
+      '0'.repeat(64),
+    ]);
+    let blocked = false;
+    try {
+      await runMigrations();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      assert(msg.includes('MIGRATION_CHECKSUM_MISMATCH'), 'failure is the checksum-mismatch guard');
+      blocked = true;
+    }
+    assert(blocked, 'checksum mismatch aborted the migration run');
+    const migrationFile = fileURLToPath(
+      new URL('../migrations/002_postgres_runtime.sql', import.meta.url)
+    );
+    const realChecksum = createHash('sha256')
+      .update(readFileSync(migrationFile, 'utf-8'), 'utf-8')
+      .digest('hex');
+    await query('UPDATE schema_migrations SET checksum = $1 WHERE version = $2', [
+      realChecksum,
+      '002',
+    ]);
+    const report = await runMigrations();
+    assert(report.skipped.includes('002'), 'restored checksum lets startup proceed');
+  });
+
+  await test('PGT-21', 'Failed migration is atomic: nothing applied, nothing recorded, retry succeeds', async () => {
+    // Disposable probe migration that fails mid-file. The runner must roll
+    // back BOTH the partial DDL and the schema_migrations record.
+    const probePath = fileURLToPath(
+      new URL('../migrations/999_pgt_atomic_probe.sql', import.meta.url)
+    );
+    writeFileSync(
+      probePath,
+      [
+        '-- PGT-21 disposable probe: intentionally fails mid-migration.',
+        'BEGIN;',
+        '',
+        'CREATE TABLE IF NOT EXISTS pgt_999_atomic_probe (id INTEGER);',
+        '',
+        'INSERT INTO pgt_999_atomic_probe (missing_column) VALUES (1);',
+        '',
+        'COMMIT;',
+        '',
+      ].join('\n'),
+      'utf-8'
+    );
+    try {
+      let failed = false;
+      try {
+        await runMigrations();
+      } catch {
+        failed = true;
+      }
+      assert(failed, 'failing migration aborts the run');
+      const recorded = await query<{ version: string }>(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['999']
+      );
+      assertEqual(recorded.length, 0, 'failed migration NOT recorded as applied');
+      const probe = await query<{ probe_exists: string | null }>(
+        "SELECT to_regclass('pgt_999_atomic_probe') AS probe_exists"
+      );
+      assert(probe[0]?.probe_exists === null, 'partial DDL rolled back (no half-applied state)');
+    } finally {
+      // Interruption-retry: with the probe removed the next run must succeed.
+      if (existsSync(probePath)) unlinkSync(probePath);
+    }
+    const retry = await runMigrations();
+    assertEqual(retry.applied.length, 0, 'retry applies nothing');
+    assertEqual(retry.skipped.length, 2, 'known migrations still intact after the failed run');
+  });
+
+  await test('PGT-22', 'Firebase sign-in provider is mapped from the verified token, never hardcoded', async () => {
+    const token = (provider: unknown) => ({ firebase: { sign_in_provider: provider } });
+    assertEqual(mapFirebaseSignInProvider(token('google.com')), 'google.com', 'google.com mapped');
+    assertEqual(mapFirebaseSignInProvider(token('password')), 'password', 'password mapped');
+    assertEqual(
+      mapFirebaseSignInProvider(token('anonymous')),
+      'anonymous_guest',
+      'anonymous mapped to anonymous_guest'
+    );
+    assertEqual(mapFirebaseSignInProvider(token('phone')), null, 'phone rejected (unsupported)');
+    assertEqual(mapFirebaseSignInProvider(token('custom')), null, 'custom rejected');
+    assertEqual(mapFirebaseSignInProvider(token('saml.my-provider')), null, 'saml rejected');
+    assertEqual(
+      mapFirebaseSignInProvider({ firebase: {} }),
+      null,
+      'missing claim rejected (fail closed)'
+    );
+    assertEqual(mapFirebaseSignInProvider({}), null, 'missing firebase claim rejected');
+    assertEqual(mapFirebaseSignInProvider(null), null, 'null token rejected');
+    // The mapped provider value persists through the users repository verbatim.
+    const uid = `${RUN}_anonprov`;
+    await upsertUserFromFirebase({
+      uid,
+      displayName: 'PG Anon',
+      emailMasked: 'pa****@test.dev',
+      emailVerified: false,
+      authProvider: 'anonymous_guest',
+      role: 'user',
+    });
+    const user = await getUser(uid);
+    assertEqual(
+      user!.authProvider,
+      'anonymous_guest',
+      'provider stored verbatim (not re-labelled google.com)'
+    );
   });
 
   await store.close();
