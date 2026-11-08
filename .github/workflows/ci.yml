@@ -10,6 +10,10 @@ jobs:
   validate-and-test:
     name: TypeScript Strict, Security Rules & Automated Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
 
     services:
       postgres:
