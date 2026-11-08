@@ -44,6 +44,12 @@ Protected overview of registered apps, users, devices, and campaigns. Requires F
 ### `POST /api/v1/auth/verify`
 Verifies a client Firebase ID token on the backend via `adminAuth.verifyIdToken()`, syncs the user's `uid` into the central database, and returns server-verified role permissions (`user` | `admin`).
 
+The synced user's `authProvider` is read from the verified token's own `firebase.sign_in_provider` claim (`google.com` | `password` | `anonymous`, stored as `anonymous_guest`) — never hardcoded and never client-supplied.
+
+**Responses**:
+- `200 OK` — token verified; server-side role returned.
+- `401 Unauthorized` — invalid/expired token (`AUTH_INVALID_ID_TOKEN`), revoked session (`AUTH_TOKEN_REVOKED`), missing/malformed Bearer header (`AUTH_MISSING_TOKEN` / `AUTH_MALFORMED_TOKEN`), or a token minted by an unsupported sign-in provider such as phone, custom, or SAML (`AUTH_PROVIDER_NOT_SUPPORTED`).
+
 ```bash
 curl -X POST http://localhost:3000/api/v1/auth/verify \
   -H "Authorization: Bearer <FIREBASE_ID_TOKEN>" \
@@ -165,4 +171,4 @@ Safely retries temporary delivery failures using bounded exponential backoff whi
 - `PUT /api/v1/system-config/:configKey` *(Admin Only)* — Updates a single config entry by key. Body: `{ "configValue": "<1..256 chars>" }`. Returns `404` if the key does not exist.
 - `POST /api/v1/tests/run` *(Admin Only, disabled in production mode)* — In in-memory demo mode, executes the 13-test automated backend, security, RBAC, idempotency, scheduler, backup, and Dirty Dozen verification suite. In the PostgreSQL runtime it honestly returns `status: "SKIPPED"` and points at the dedicated integration suite (`npm run test:pg`) instead of reporting in-memory results as if they described the runtime.
 
-Note on delivery metrics: `sentCount` counts only confirmed deliveries, `failedCount` counts transient/expired-token/permanent failures, and devices skipped by user notification preferences or quiet hours are recorded as `skipped_preference` / `skipped_quiet_hours` receipts and counted in neither. Counts are derived strictly from per-device delivery receipts in PostgreSQL; there is no inflation by `registeredDevicesCount`. Delivery receipt statuses: `delivered`, `failed_transient`, `failed_expired_token`, `failed_permanent`, `skipped_preference`, `skipped_quiet_hours`.
+Note on delivery metrics: `sentCount` counts only confirmed deliveries, `failedCount` counts transient/expired-token/permanent failures, and devices skipped by user notification preferences or quiet hours are recorded as `skipped_preference` / `skipped_quiet_hours` receipts and counted in neither. Counts are derived strictly from per-device delivery receipts in PostgreSQL; there is no inflation by `registeredDevicesCount`. Delivery receipt statuses: `delivered`, `failed_transient`, `failed_expired_token`, `failed_permanent`, `skipped_preference`, `skipped_quiet_hours`. When `FCM_DRY_RUN=true`, FCM validates requests without delivering and the resulting receipts carry `dryrun:`-prefixed message IDs (never real delivery confirmations); delivery is at-least-once by design (see `SECURITY.md`).

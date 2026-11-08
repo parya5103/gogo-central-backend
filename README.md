@@ -15,7 +15,7 @@ A secure, centralized, multi-product backend and Firebase Cloud Messaging (FCM) 
 
 ### Prerequisites
 - Docker & Docker Compose v2+
-- Node.js 22+ (optional for running host-side CLI scripts)
+- Node.js 24+ (LTS; the installed `@firebase/*` packages declare `engines >= 24.12.0`, so Node 24 avoids EBADENGINE install warnings without `--force` or `--legacy-peer-deps`)
 
 ### Commands
 ```bash
