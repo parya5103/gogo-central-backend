@@ -203,7 +203,7 @@ jobs:
           echo "health/ready: $READY"
           echo "$READY" | grep -q '"database":"connected"'
 
-      - name: PostgreSQL restart: process stays live and readiness recovers
+      - name: "PostgreSQL restart: process stays live and readiness recovers"
         run: |
           set -euo pipefail
           docker compose restart postgres
@@ -230,7 +230,7 @@ jobs:
           docker compose logs --tail 120
           exit 1
 
-      - name: Graceful shutdown: SIGTERM drains and exits 0
+      - name: "Graceful shutdown: SIGTERM drains and exits 0"
         run: |
           set -euo pipefail
           docker compose stop gogo-backend
