@@ -25,6 +25,7 @@ process.env.GOGO_TEST_IMPORT = 'true';
 process.env.GOGO_ENABLE_SANDBOX_AUTH = 'true';
 
 import type { Server } from 'node:http';
+import assert from 'node:assert/strict';
 import { runMigrations } from '../src/db/migrate.ts';
 import { query, closePool } from '../src/db/pool.ts';
 import { createDevice, getDevice } from '../src/repositories/devices.repository.ts';
@@ -482,6 +483,7 @@ async function tierBPostgresTests(): Promise<void> {
       });
       const retry = await store.retryFailedCampaign(c.campaign.notificationId, authorUid);
       assert(!retry.error, `retry completed without error: ${retry.error ?? 'none'}`);
+      assert(retry.campaign !== null, 'retry returns the updated campaign');
       assertEqual(retry.campaign.sentCount, 1, 'retry delivered the previously failed device');
     } finally {
       setTestFirebaseOverrides({});
