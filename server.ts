@@ -333,42 +333,43 @@ export async function createGoGoApp() {
   );
 
   // 2. Strict CORS Policy for GoGo Domains + Cloud Run Preview
+  // Uses the cors options-delegate form (req is available) so rejected origins
+  // are logged as security events with the trusted client IP.
   app.use(
-    cors({
-      origin: (origin, req, callback) => {
-        if (!origin) {
-          return callback(null, true);
-        }
-        try {
-          const parsedOrigin = new URL(origin);
-          const isAllowedPreview =
-            process.env.NODE_ENV !== 'production' && parsedOrigin.hostname.endsWith('.run.app');
-          const isAllowedGoGoSubdomain =
-            parsedOrigin.protocol === 'https:' &&
-            parsedOrigin.hostname.endsWith('.gogocompany.in');
+    cors((req, callback) => {
+      const origin = req.headers.origin;
+      if (!origin) {
+        // Same-origin / non-browser tools: no CORS headers needed.
+        return callback(null, { origin: false, credentials: true });
+      }
 
-          if (
-            ALLOWED_GOGO_ORIGINS.has(origin) ||
-            isAllowedGoGoSubdomain ||
-            isAllowedPreview
-          ) {
-            return callback(null, true);
-          }
-        } catch {
-          // Invalid origin URL falls through to rejection
-        }
+      let allowed = false;
+      try {
+        const parsedOrigin = new URL(origin);
+        const isAllowedPreview =
+          process.env.NODE_ENV !== 'production' && parsedOrigin.hostname.endsWith('.run.app');
+        const isAllowedGoGoSubdomain =
+          parsedOrigin.protocol === 'https:' &&
+          parsedOrigin.hostname.endsWith('.gogocompany.in');
 
+        allowed =
+          ALLOWED_GOGO_ORIGINS.has(origin) || isAllowedGoGoSubdomain || isAllowedPreview;
+      } catch {
+        // Invalid origin URL falls through to rejection
+        allowed = false;
+      }
+
+      if (!allowed) {
         backendStore.recordSecurityEvent(
           'CORS_ORIGIN_REJECTED',
           'central-control',
           'CORS Preflight',
           'medium',
           `Blocked unauthorized cross-origin request from ${origin}`,
-          extractTrustedClientIp(req)
+          extractTrustedClientIp(req as unknown as Request)
         );
-        return callback(new Error('Not allowed by GoGo Central Backend CORS policy'));
-      },
-      credentials: true,
+      }
+      return callback(null, { origin: allowed, credentials: true });
     })
   );
 
