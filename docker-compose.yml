@@ -1,3 +1,7 @@
+# LOCAL DEVELOPMENT ONLY. This stack is the development/demo runtime
+# (postgres 18 + the API server) with a documented local development password.
+# It is NOT a production deployment configuration; production deployment
+# (Cloud Run, real secret management) is documented separately in README.md.
 services:
   postgres:
     image: postgres:18-alpine
@@ -8,7 +12,10 @@ services:
       POSTGRES_USER: gogo_app_user
       POSTGRES_PASSWORD: local_dev_only_password_change_in_prod
     ports:
-      - "5432:5432"
+      # Loopback binding: reachable from the dev machine (psql, DB GUIs) but
+      # never exposed to the LAN/public interfaces. The backend reaches the
+      # database over the internal Compose network via the service DNS name.
+      - "127.0.0.1:5432:5432"
     volumes:
       # postgres:18 images store data in version-specific subdirectories, so
       # the canonical mount point is /var/lib/postgresql (NOT .../data —

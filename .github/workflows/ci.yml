@@ -57,6 +57,41 @@ jobs:
       - name: TypeScript Type-Check (tsc --noEmit)
         run: set -o pipefail && npm run lint 2>&1 | tee /tmp/tsc.log
 
+      - name: TypeScript strict-mode audit (informational, does not fail CI)
+        continue-on-error: true
+        run: set -o pipefail && npx tsc --noEmit --strict --pretty false 2>&1 | tee /tmp/tsc-strict.log
+
+      - name: Report strict-mode audit summary to pull request
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let content = '';
+            try {
+              content = fs.readFileSync('/tmp/tsc-strict.log', 'utf8').trim();
+            } catch {}
+            if (!content) {
+              console.log('Strict-mode audit log empty or missing; nothing to report.');
+              return;
+            }
+            const errorLines = content.split('\n').filter((l) => l.includes('error TS'));
+            if (errorLines.length === 0) {
+              console.log('No strict-mode errors found. Enabling strict in tsconfig.json is unblocked.');
+              return;
+            }
+            const body = 'TypeScript `--strict` audit (informational, does not fail CI): ' +
+              errorLines.length + ' error(s). Full list is in the job log.\n\n' +
+              '<details><summary>first 40 errors</summary>\n\n```\n' +
+              errorLines.slice(0, 40).join('\n') +
+              '\n```\n</details>';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
       - name: Verify PostgreSQL 10-Table Schema & Backup Script
         run: set -o pipefail && bash ./scripts/backup-restore.sh verify-schema 2>&1 | tee /tmp/schema.log
 
@@ -138,7 +173,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'testpg', 'build', 'docker'];
+            const logs = ['install', 'eslint', 'tsc', 'tsc-strict', 'schema', 'test', 'testpg', 'build', 'docker'];
             let body = 'CI failed. Captured step output:\n';
             for (const name of logs) {
               try {
@@ -207,32 +242,52 @@ jobs:
           echo "health/ready: $READY"
           echo "$READY" | grep -q '"database":"connected"'
 
-      - name: "PostgreSQL restart: process stays live and readiness recovers"
+      - name: "Database outage: readiness reports 503, liveness stays 200"
         run: |
           set -euo pipefail
-          docker compose restart postgres
-          sleep 3
-          # Liveness is process-only: a database outage must NOT kill the app.
-          LIVE=$(curl -sf --max-time 20 http://localhost:3000/api/v1/health/live)
-          echo "health/live during DB restart: $LIVE"
-          echo "$LIVE" | grep -q '"status":"ok"'
-          # Readiness must honestly report unavailability while PG is down.
-          if curl -sf --max-time 20 http://localhost:3000/api/v1/health/ready > /dev/null 2>&1; then
-            echo "NOTE: PG came back fast; ready already 200 (valid fast recovery)."
-          else
-            echo "Confirmed: readiness reports unavailable during database restart."
+          echo "Stopping postgres to create a deterministic outage (restart recovers too fast to observe)."
+          docker compose stop postgres
+          # Readiness must honestly report 503 while the database is down.
+          SAW_OUTAGE=0
+          for i in $(seq 1 30); do
+            READY_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 http://localhost:3000/api/v1/health/ready || true)
+            LIVE_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://localhost:3000/api/v1/health/live || true)
+            echo "during outage: ready=$READY_CODE live=$LIVE_CODE (attempt $i)"
+            if [ "$LIVE_CODE" != "200" ]; then
+              echo "FAIL: liveness died during the database outage."
+              docker logs --tail 60 gogo-central-backend
+              exit 1
+            fi
+            if [ "$READY_CODE" = "503" ]; then SAW_OUTAGE=1; break; fi
+            sleep 1
+          done
+          if [ "$SAW_OUTAGE" != "1" ]; then
+            echo "FAIL: readiness never reported 503 while postgres was fully stopped."
+            docker logs --tail 60 gogo-central-backend
+            exit 1
           fi
+          echo "Verified: readiness reported 503 during the outage while liveness stayed 200."
+
+      - name: "PostgreSQL recovery: readiness returns 200 and a real query works"
+        run: |
+          set -euo pipefail
+          docker compose start postgres
           # Recovery: readiness must return to 200 after PG is healthy again.
           for i in $(seq 1 40); do
             if curl -sf --max-time 20 http://localhost:3000/api/v1/health/ready > /dev/null 2>&1; then
-              echo "Application recovered after PostgreSQL restart (attempt $i)."
+              echo "Application recovered after PostgreSQL outage (attempt $i)."
               exit 0
             fi
             sleep 3
           done
-          echo "FAIL: application did not recover after PostgreSQL restart."
+          echo "FAIL: application did not recover after the PostgreSQL outage."
           docker compose logs --tail 120
           exit 1
+
+      - name: "Post-recovery database operation via the application pool"
+        run: |
+          set -euo pipefail
+          docker exec gogo-central-backend node --import tsx -e "(async () => { const { getPool, closePool } = await import('/app/src/db/pool.ts'); const r = await getPool().query('SELECT COUNT(*)::int AS applied FROM schema_migrations'); console.log('DB operation OK: schema_migrations applied =', r.rows[0].applied); await closePool(); })()"
 
       - name: "Graceful shutdown: SIGTERM drains and exits 0"
         run: |

@@ -6,7 +6,8 @@ FROM node:24-alpine AS builder
 WORKDIR /app
 
 # Install dependencies reproducibly from the committed package-lock.json
-# (generated and npm ci-verified in CI; bun.lock remains for Bun users).
+# (generated and npm ci-verified in CI; the stale bun.lock was removed —
+# npm is the single supported package manager).
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
