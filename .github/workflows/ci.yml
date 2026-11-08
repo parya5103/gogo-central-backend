@@ -73,11 +73,28 @@ jobs:
           FCM_DRY_RUN: 'true'
         run: set -o pipefail && npm run test:pg 2>&1 | tee /tmp/testpg.log
 
+      - name: Provision an isolated disposable database for the matrix suite
+        # The matrix suite's own contract requires a disposable PostgreSQL
+        # instance: its ecosystem targeting resolves candidates with an
+        # UNFILTERED device query, so any rows left behind by the PGT suite
+        # (which runs first against this same service and this same database,
+        # e.g. its sarkari-sarthi fixtures from PGT-05/PGT-12) are reachable
+        # by the MX-06/MX-07 dispatches and corrupt the honest sentCount
+        # assertions. One suite, one database; the matrix suite applies
+        # migrations itself, so a fresh empty database is all it needs.
+        run: |
+          set -euo pipefail
+          docker run --rm --network host -e PGPASSWORD=ci_test_password postgres:18-alpine \
+            psql -h 127.0.0.1 -U gogo_app_user -d gogo_central -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS gogo_matrix" \
+            -c "CREATE DATABASE gogo_matrix OWNER gogo_app_user"
+          echo "gogo_matrix ready for the matrix suite."
+
       - name: Notification Matrix Tests (five-product targeting; MOCKED FCM seam, clearly labelled)
         env:
           SQL_HOST: 127.0.0.1
           SQL_PORT: '5432'
-          SQL_DB_NAME: gogo_central
+          SQL_DB_NAME: gogo_matrix
           SQL_USER: gogo_app_user
           SQL_PASSWORD: ci_test_password
           FCM_DRY_RUN: 'true'
