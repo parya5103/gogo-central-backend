@@ -1,5 +1,33 @@
 # GoGo Central Backend — Implementation Changelog (`CHANGELOG.md`)
 
+## [2.1.0] — 2026-11-08 (Ecosystem Notification Readiness: Matrix Tests, Admin Panel Truth Mode, Duplicate-Token Upsert, Cloud Run Kit)
+
+### Notification Delivery Fixes
+- **[HIGH] Duplicate FCM token registration is now a token-unique upsert (`src/repositories/devices.repository.ts`)**: re-registering the same token (web token refresh, re-opt-in, returning device) previously violated the global `UNIQUE (fcm_token)` constraint (23505 → HTTP 500). The upsert now targets `ON CONFLICT (fcm_token)`, refreshing the user binding, platform, user agent and re-activating the row while keeping the original `device_id` stable (auditable identity). One token can never occupy two rows, so duplicate delivery to the same device is structurally impossible. Covered by `MX-05`.
+- **[MEDIUM] Honest delivery-mode flag (`server.ts`)**: `GET /api/v1/overview` now returns `fcmDryRun: boolean` (`process.env.FCM_DRY_RUN === 'true'`) so the admin panel labels dry-run vs live sends from server truth instead of guessing.
+
+### Admin Control Panel (Phase 5)
+- **`src/App.tsx`**: the FCM Hub now shows a DRY-RUN / LIVE / UNKNOWN delivery-mode badge sourced from the server flag; an Ecosystem Audience & Eligibility summary (per-product active and eligible device counts — active device + enabled preference + platform gate — plus the ecosystem-wide eligible total); and a live notification Preview card (title, body, deep link) above the dispatch button. Audience math is a client-side projection of admin overview data; it never fabricates delivery.
+
+### Ecosystem Notification Matrix (Phase 4)
+- **`tests/notification-matrix.test.ts` (`MX-01`..`MX-11`, `npm run test:matrix`)**: two-tier matrix. Tier A (HTTP, in-memory adapter): per-product device registration for all five products (+404 unknown appId, +400 malformed token), the Firebase auth failure contract on registration (missing 401, forged 401, MOCKED revoked 401), and admin-only broadcast protection (user 403, MOCKED non-admin Firebase user 403, admin 201). Tier B (real PostgreSQL, `PostgresDataStore` + `NotificationWorker`): five-product device+preference registration, duplicate-token refresh upsert, ecosystem (`all-gogo`) target selection across products with MOCKED dry-run receipts, user opt-out (`skipped_preference`), platform preference gates, idempotency replay + payload mismatch + bounded retry (MOCKED transient failure → successful retry), invalid-token cleanup (`failed_expired_token` + device marked `expired`), and the deep-link allowlist. MOCKED tests are labelled MOCKED; nothing here claims live FCM delivery (live delivery requires real credentials — see `docs/DEPLOYMENT.md`).
+- **CI**: the main test job runs `npm run test:matrix` against the PostgreSQL 18 service with `FCM_DRY_RUN=true`; failures post captured logs as PR comments.
+
+### Cloud Run Deployment Kit (Phase 2 — configuration only, nothing provisioned)
+- **`docs/DEPLOYMENT.md`**: complete zero/minimal-cost deployment manual — GCP project + billing warnings, Neon PostgreSQL free tier, Secret Manager secrets (SQL password + Firebase service-account JSON), Cloud Run deploy with min-instances 0, health verification, migrations (auto-applied at startup under the advisory lock), pg_dump backup/restore, revision-based rollback, cost/quota warnings, and the exact remaining manual steps (Firebase Console: enable Anonymous + Google providers, authorized domains, generate the Web Push VAPID key; per-site `API_BASE`/`VAPID_PUBLIC_KEY` configuration).
+- **`deploy/cloudrun/service.yaml`**: Knative service manifest (min-scale 0, max-scale 3, 512Mi/1 CPU, liveness + readiness probes on the split health endpoints, `FCM_DRY_RUN=false`, `SQL_*` env placeholders) deployable via `gcloud run services replace`.
+- **`scripts/deploy-cloudrun.sh`**: parameterized build + deploy + post-deploy health probe script (documented; intentionally NOT executed — deployment requires explicit owner approval and GCP access).
+
+### API contract
+- `GET /api/v1/overview` adds `fcmDryRun`. `POST /api/v1/devices/register` now documents register-or-refresh semantics: the same FCM token refreshes the existing row (stable `device_id`) instead of failing. Both documented in the `API.md` addendum.
+
+### Disclosed Limitations (v2.1.0)
+- Nothing is deployed: Cloud Run / Neon / Secret Manager are configuration and documentation only (₹0 mandate; execution requires the owner and a GCP billing account even for free-tier usage).
+- Live Firebase verification and live FCM delivery remain blocked on real credentials (unchanged since v2.0.0).
+- Matrix Tier B uses the `GOGO_TEST_IMPORT`-guarded FCM seam (MOCKED multicast responses); it verifies routing, gating, receipts and cleanup logic, not live delivery.
+
+---
+
 ## [2.0.0] — 2026-11-08 (PostgreSQL Runtime Integration & Production Hardening)
 
 ### Runtime Persistence (the headline change)

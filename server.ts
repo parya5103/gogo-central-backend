@@ -609,6 +609,10 @@ export async function createGoGoApp() {
 
     res.json({
       currentUser: req.user,
+      // Honest delivery-mode flag: true means FCM_DRY_RUN=true (receipts are
+      // simulated and dryrun:-prefixed). The admin panel renders this so a
+      // dry-run campaign can never be mistaken for a real broadcast.
+      fcmDryRun: process.env.FCM_DRY_RUN === 'true',
       products,
       users: isAdmin ? await store().listUsers() : [],
       devices,
@@ -772,7 +776,7 @@ export async function createGoGoApp() {
         req.user!.uid,
         appId,
         'DEVICE_TOKEN_REGISTER',
-        deviceId,
+        record.deviceId,
         'info',
         `Registered ${platform.toUpperCase()} FCM token for ${appId}.`
       );

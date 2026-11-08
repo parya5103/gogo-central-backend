@@ -172,3 +172,16 @@ Safely retries temporary delivery failures using bounded exponential backoff whi
 - `POST /api/v1/tests/run` *(Admin Only, disabled in production mode)* — In in-memory demo mode, executes the 13-test automated backend, security, RBAC, idempotency, scheduler, backup, and Dirty Dozen verification suite. In the PostgreSQL runtime it honestly returns `status: "SKIPPED"` and points at the dedicated integration suite (`npm run test:pg`) instead of reporting in-memory results as if they described the runtime.
 
 Note on delivery metrics: `sentCount` counts only confirmed deliveries, `failedCount` counts transient/expired-token/permanent failures, and devices skipped by user notification preferences or quiet hours are recorded as `skipped_preference` / `skipped_quiet_hours` receipts and counted in neither. Counts are derived strictly from per-device delivery receipts in PostgreSQL; there is no inflation by `registeredDevicesCount`. Delivery receipt statuses: `delivered`, `failed_transient`, `failed_expired_token`, `failed_permanent`, `skipped_preference`, `skipped_quiet_hours`. When `FCM_DRY_RUN=true`, FCM validates requests without delivering and the resulting receipts carry `dryrun:`-prefixed message IDs (never real delivery confirmations); delivery is at-least-once by design (see `SECURITY.md`).
+
+---
+
+## Addendum — v2.1.0 (Ecosystem Notification Readiness)
+
+### GET /api/v1/overview
+New top-level field `fcmDryRun: boolean` — `true` when the server runs with `FCM_DRY_RUN=true` (receipts carry `dryrun:`-prefixed message IDs and nothing is really delivered). The admin panel renders the delivery-mode badge from this flag.
+
+### POST /api/v1/devices/register — register-or-refresh semantics
+`fcm_token` is globally unique. Re-registering the same token (web token refresh after a service-worker update, re-opt-in, or a returning device) now refreshes the existing row: `user_id`, `platform` and `user_agent` are updated, `status` returns to `active`, `last_refreshed_at` is bumped, and the original `device_id` is preserved (stable audit identity). It never creates a second row, so the same physical device cannot be targeted twice in one campaign. Previously this failed with HTTP 500 (unique-constraint violation).
+
+### Notification matrix coverage
+`tests/notification-matrix.test.ts` (MX-01..MX-11) covers: per-product registration for all five products, duplicate-token refresh, the Firebase auth failure contract, admin-only broadcast protection, user opt-out enforcement, platform preference gates, invalid-token cleanup, ecosystem (`appId: "all-gogo"`, `targetType: "ecosystem"`) target selection, and retry/idempotency behavior. FCM multicast responses are MOCKED via the `GOGO_TEST_IMPORT`-guarded seam; live delivery verification is a manual post-deployment step (`docs/DEPLOYMENT.md`).
