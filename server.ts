@@ -6,6 +6,11 @@
  * Serves versioned /api/v1 REST endpoints and Vite SPA frontend on Port 3000.
  */
 
+// Load .env.local / .env BEFORE any other module reads process.env. This
+// must stay the FIRST import: ESM evaluates imports in statement order and
+// the modules below read environment variables at load time. Real
+// environment variables (CI, Docker, Cloud Run) always win over both files.
+import './src/lib/load-env.ts';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
