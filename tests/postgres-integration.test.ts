@@ -37,6 +37,7 @@ import {
 } from '../src/repositories/campaigns.repository.ts';
 import { insertDeliveryReceipt } from '../src/repositories/deliveries.repository.ts';
 import { updateSystemConfig, getNumberConfig } from '../src/repositories/config.repository.ts';
+import { createApp } from '../src/repositories/apps.repository.ts';
 import { PostgresDataStore } from '../src/server/postgres-store.ts';
 import { PostgresRateLimitStore } from '../src/server/rate-limit-pg.ts';
 import { NotificationWorker } from '../src/server/notification-worker.ts';
@@ -88,6 +89,27 @@ function hourIn(timeZone: string): number {
 
 function hh(hour: number): string {
   return String(((hour % 24) + 24) % 24).padStart(2, '0');
+}
+
+/**
+ * Isolation helper: each delivery-path test registers its own throwaway app
+ * so broadcasts reach only that test's device (no cross-test device leakage
+ * from PGT-05/PGT-12 fixtures).
+ */
+async function isolateApp(slot: string): Promise<string> {
+  const appId = `${RUN}_app_${slot}`;
+  const app = await createApp({
+    appId,
+    name: `PGT ${slot}`,
+    domain: 'https://gogocompany.in/',
+    category: 'news',
+    fcmEnabled: true,
+    webPushEnabled: true,
+    androidEnabled: true,
+    rateLimitPerMin: 60,
+  });
+  if (app === null) throw new Error(`APP_CREATE_FAILED: ${appId}`);
+  return appId;
 }
 
 async function main(): Promise<void> {
@@ -469,6 +491,7 @@ async function main(): Promise<void> {
   });
 
   await test('PGT-13', 'Marketing opt-out: broadcast never bypasses preferences', async () => {
+    const appId = await isolateApp('optout');
     const uid = `${RUN}_optout`;
     await store.syncUser(uid, {
       displayName: 'PG OptOut',
@@ -480,12 +503,12 @@ async function main(): Promise<void> {
     await store.createDevice({
       deviceId: `${RUN}_dev_optout`,
       userId: uid,
-      appId: TEST_APP,
+      appId,
       fcmToken: 'fcm_ci_demo_optout',
       platform: 'android',
       userAgent: 'pgt-agent',
     });
-    await store.upsertPreference(uid, TEST_APP, {
+    await store.upsertPreference(uid, appId, {
       enabled: true,
       webPush: true,
       androidPush: true,
@@ -496,7 +519,7 @@ async function main(): Promise<void> {
     });
     const result = await store.dispatchNotification({
       idempotencyKey: `${RUN}_optout_key`,
-      appId: TEST_APP,
+      appId,
       targetType: 'broadcast', // marketing
       targetValue: 'all-users',
       platform: 'all',
@@ -522,6 +545,7 @@ async function main(): Promise<void> {
   });
 
   await test('PGT-14', 'Quiet hours enforced in the user timezone (Asia/Kolkata)', async () => {
+    const appId = await isolateApp('quiet');
     const uid = `${RUN}_quiet`;
     await store.syncUser(uid, {
       displayName: 'PG Quiet',
@@ -533,13 +557,13 @@ async function main(): Promise<void> {
     await store.createDevice({
       deviceId: `${RUN}_dev_quiet`,
       userId: uid,
-      appId: TEST_APP,
+      appId,
       fcmToken: 'fcm_ci_demo_quiet',
       platform: 'android',
       userAgent: 'pgt-agent',
     });
     await setUserTimezone(uid, 'Asia/Kolkata');
-    await store.upsertPreference(uid, TEST_APP, {
+    await store.upsertPreference(uid, appId, {
       enabled: true,
       webPush: true,
       androidPush: true,
@@ -551,7 +575,7 @@ async function main(): Promise<void> {
     });
     const result = await store.dispatchNotification({
       idempotencyKey: `${RUN}_quiet_key`,
-      appId: TEST_APP,
+      appId,
       targetType: 'broadcast',
       targetValue: 'all-users',
       platform: 'all',
@@ -573,6 +597,7 @@ async function main(): Promise<void> {
     assertEqual(isValidIANATimezone('Asia/Kolkata'), true, 'valid IANA zone accepted');
     assertEqual(isValidIANATimezone('Mars/Olympus_Mons'), false, 'invalid IANA zone rejected');
 
+    const appId = await isolateApp('tz');
     const uid = `${RUN}_tz`;
     await store.syncUser(uid, {
       displayName: 'PG TZ',
@@ -584,7 +609,7 @@ async function main(): Promise<void> {
     await store.createDevice({
       deviceId: `${RUN}_dev_tz`,
       userId: uid,
-      appId: TEST_APP,
+      appId,
       fcmToken: 'fcm_ci_demo_tz',
       platform: 'android',
       userAgent: 'pgt-agent',
@@ -594,7 +619,7 @@ async function main(): Promise<void> {
     assert(kiriHour !== kolkataHour, 'sanity: zone hours differ');
 
     await setUserTimezone(uid, 'Pacific/Kiritimati');
-    await store.upsertPreference(uid, TEST_APP, {
+    await store.upsertPreference(uid, appId, {
       enabled: true,
       webPush: true,
       androidPush: true,
@@ -605,7 +630,7 @@ async function main(): Promise<void> {
     });
     const inKiritimati = await store.dispatchNotification({
       idempotencyKey: `${RUN}_tz_kiri`,
-      appId: TEST_APP,
+      appId,
       targetType: 'broadcast',
       targetValue: 'all-users',
       platform: 'all',
@@ -625,7 +650,7 @@ async function main(): Promise<void> {
     await setUserTimezone(uid, 'Asia/Kolkata');
     const inKolkata = await store.dispatchNotification({
       idempotencyKey: `${RUN}_tz_ist`,
-      appId: TEST_APP,
+      appId,
       targetType: 'broadcast',
       targetValue: 'all-users',
       platform: 'all',
