@@ -8,32 +8,28 @@ Content-Type: application/json
 X-GoGo-App-Id: sarkari-sarthi
 ```
 
+Local testing alternative: `X-GoGo-Sandbox-Role: admin | user` headers are rejected everywhere by default and always rejected in production mode. They only work when `NODE_ENV !== "production"` and `GOGO_ENABLE_SANDBOX_AUTH=true` is explicitly set for local/CI testing.
+
 ---
 
 ## 1. System & Repository Audit Endpoints
 
 ### `GET /api/v1/health`
-Public container & database health check used by Docker Compose and Cloud Run startup/liveness probes.
+Public liveness probe used by Docker Compose. Intentionally minimal: no version, uptime, infrastructure, or project identifiers are exposed publicly.
 
 **Response `200 OK`**:
 ```json
 {
-  "status": "healthy",
-  "service": "gogo-central-backend",
-  "version": "1.0.0",
-  "uptimeSeconds": 1482,
-  "architecture": {
-    "runtime": "Node.js + TypeScript Strict",
-    "auth": "Firebase Admin SDK (verifyIdToken)",
-    "messaging": "Firebase Cloud Messaging (FCM v1)",
-    "database": "PostgreSQL 16 + Firestore Sync"
-  },
-  "securityRulesVerified": true
+  "status": "ok",
+  "timestamp": "2026-11-08T12:00:00.000Z"
 }
 ```
 
-### `GET /api/v1/audit-report`
-Returns the complete Phase 1 Repository Audit of `parya5103/gogo-central-backend` (legacy Cloudflare Workers/D1 findings, reusable components, security risks resolved, and Phase 1–9 status).
+### `GET /api/v1/health/detailed` *(Admin Only)*
+Protected diagnostics endpoint exposing uptime, Firebase project ID, and store metrics.
+
+### `GET /api/v1/overview`
+Protected overview of registered apps, users, devices, and campaigns. Requires Firebase auth (or the sandbox header when `GOGO_ENABLE_SANDBOX_AUTH=true` in non-production environments).
 
 ---
 
@@ -153,7 +149,10 @@ Safely retries temporary delivery failures using bounded exponential backoff whi
 
 ## 7. Security Events, Audit Logs & Automated Self-Test Suite
 
-- `GET /api/v1/audit-logs` *(Admin Only)* — Lists immutable admin and user audit logs.
-- `GET /api/v1/security-events` *(Admin Only)* — Lists OWASP API security events (blocked unverified tokens, rate-limit hits, invalid schemas, duplicate idempotency catches).
-- `GET /api/v1/system-config` & `PUT /api/v1/system-config` *(Admin Only)* — Manages global FCM retry policies, quiet hours enforcement, and maintenance flags.
-- `POST /api/v1/tests/run` *(Admin Only)* — Executes the 18-point automated backend, security, RBAC, idempotency, and Dirty Dozen verification suite.
+- `GET /api/v1/audit-logs` *(Admin Only)* — Lists immutable admin and user audit logs. Supports `?limit=<1..200>` (default 50, newest first). Returns `{ auditLogs, count, total }`.
+- `GET /api/v1/security-events` *(Admin Only)* — Lists OWASP API security events (blocked unverified tokens, rate-limit hits, invalid schemas, duplicate idempotency catches). Supports `?limit=<1..200>`. Returns `{ securityEvents, count, total }`.
+- `GET /api/v1/system-config` *(Admin Only)* — Lists global FCM retry policies, quiet hours enforcement, and maintenance flags. Returns `{ systemConfigs, count }`.
+- `PUT /api/v1/system-config/:configKey` *(Admin Only)* — Updates a single config entry by key. Body: `{ "configValue": "<1..256 chars>" }`. Returns `404` if the key does not exist.
+- `POST /api/v1/tests/run` *(Admin Only, disabled in production mode)* — Executes the 13-test automated backend, security, RBAC, idempotency, scheduler, backup, and Dirty Dozen verification suite.
+
+Note on delivery metrics: `sentCount` counts only confirmed deliveries, `failedCount` counts transient/expired-token failures, and devices skipped by user notification preferences are recorded as `skipped_preference` receipts and counted in neither. Counts are derived strictly from per-device delivery receipts; there is no inflation by `registeredDevicesCount`.

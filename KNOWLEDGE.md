@@ -1,5 +1,15 @@
 # GoGo Central Backend — Project Knowledge Base (`KNOWLEDGE.md`)
 
+## 0. Master Audit State (2026-11-08, v1.3.0)
+
+- An independent master audit of all 31 repository files produced findings SEC-09..SEC-18 (see `SECURITY.md` §1a) covering sandbox-auth defaults, FCM dry-run swallowing, fabricated metrics, CORS misconfig, backup gaps, and in-memory persistence.
+- All security/integrity fixes shipped in v1.3.0; verification path is GitHub Actions CI (`npm install`, Firestore rules lint, `tsc --noEmit`, 14-test HTTP regression suite).
+- Verified facts: sandbox headers are rejected by default and in production; delivery counts are receipt-derived; backups export all 10 tables; CI runs on PostgreSQL 18.
+- Known open items (do not assume fixed): PostgreSQL runtime wiring (needs `pg` dep + repository layer), tsconfig strict enablement, cross-process idempotency, quiet-hours enforcement, `bun.lock` staleness, Firebase emulator rules tests.
+- The 10-table PostgreSQL schema (`migrations/001_initial_schema.sql`) and provider adapter (`src/db/postgres-config.ts`) are designed and tested at config level, but the Express runtime still holds state in memory. Treat any "PostgreSQL is authoritative at runtime" claim as false until the persistence milestone lands (see `ARCHITECTURE.md` §2a).
+
+---
+
 ## 1. Repository Audit: `parya5103/gogo-central-backend`
 
 ### 1.1 Legacy Architecture Findings

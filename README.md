@@ -25,10 +25,31 @@ cp .env.example .env
 # 2. Start PostgreSQL 18 (postgres:18-alpine) + GoGo Central Backend
 docker compose up --build
 
-# 3. Verify health check & run 10-point security regression suite
+# 3. Verify health check & run the security regression suite
 curl http://localhost:3000/api/v1/health
 npm test
 ```
+
+`npm test` runs 14 live HTTP regression tests (`REG-01`..`REG-14`) against an in-process app instance. It self-activates the `GOGO_ENABLE_SANDBOX_AUTH=true` test opt-in; the deployed server itself keeps sandbox headers disabled by default.
+
+---
+
+## 1a. Environment Variables
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `NODE_ENV` | unset (= development) | `production` disables sandbox headers, the self-test endpoint, and the dev dashboard fallback. `docker-compose.yml` sets it to `production`. |
+| `GOGO_ENABLE_SANDBOX_AUTH` | unset (= disabled) | Opt-in for `X-GoGo-Sandbox-Role: admin/user` header auth in non-production local/CI testing. Never enable in production or on any internet-reachable deployment. |
+| `FCM_DRY_RUN` | unset (= real sends) | When `true`, real-token FCM requests are validated by Firebase without delivering. Requires `GOOGLE_APPLICATION_CREDENTIALS` to point at a service-account key either way. |
+| `CORS_ALLOWED_ORIGINS` | unset | Comma-separated extra origins merged into the GoGo-owned allowlist (`gogocompany.in` and subdomains). |
+| `SQL_HOST`, `SQL_PORT`, `SQL_DB_NAME`, `SQL_USER`, `SQL_PASSWORD`, `PG_PROVIDER` | see `.env.example` | PostgreSQL connection settings consumed by migration/backup scripts and `src/db/postgres-config.ts` (runtime persistence wiring is pending, see `ARCHITECTURE.md` §2a). |
+| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Firebase service-account JSON used by `firebase-admin` for Auth verification and FCM. Without it, the server runs with demo `fcm_*` token simulation and Firebase token verification fails closed (401). |
+
+---
+
+## 1b. Persistence Status (Read Before Production Use)
+
+The Express runtime currently keeps all state in memory (see `ARCHITECTURE.md` §2a). Data is lost on restart, and idempotency is per-process. The PostgreSQL 18 schema, migrations, backups, and provider config are fully designed and testable, but the runtime does not yet read/write PostgreSQL. Do not point live website traffic at this backend until the persistence milestone lands.
 
 ---
 
@@ -83,7 +104,7 @@ npm run db:verify
 # 2. Generate a transactional SQL backup dump (backups/gogo_central_latest.sql)
 npm run db:backup
 
-# 3. Verify and restore from the transactional SQL backup dump
+# 3. Validate the transactional SQL backup dump (prints the psql restore command; does not execute SQL)
 npm run db:restore
 
 # 4. Native pg_dump / psql compressed backup & single-transaction restore (when pg_dump is installed)
@@ -113,4 +134,4 @@ Switch PostgreSQL providers purely via environment variables without changing an
 | **Firebase ID Token Verification (`verifyIdToken`)** | Yes (`checkRevoked = true`) | Same Firebase project (`gen-lang-client-0566323659`) | Ensure all 5 websites use the shared Firebase project ID |
 | **FCM Notification Engine & Idempotency** | Yes (Deduplication, retries, token lifecycle) | Public HTTPS URL for webhook/background workers | Add Web Push `firebase-messaging-sw.js` + VAPID key on each site |
 | **Admin Dashboard & RBAC Security** | Yes (`http://localhost:3000`) | Cloud Run HTTPS URL (`--min-instances=0`) | Configure `CORS_ALLOWED_ORIGINS` for `https://gogocompany.in` |
-| **Backup & Transactional Restore** | Yes (`npm run db:backup` / `db:restore`) | Automated daily cron or Cloud SQL backups | Verify initial backup before onboarding live traffic |
+| **Backup & Transactional Restore** | Yes (`npm run db:backup` exports all 10 tables; `db:restore` validates the dump and prints the `psql` restore command) | Automated daily cron or Cloud SQL backups | Verify initial backup before onboarding live traffic |
