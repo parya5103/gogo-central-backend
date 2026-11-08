@@ -57,41 +57,6 @@ jobs:
       - name: TypeScript Type-Check (tsc --noEmit)
         run: set -o pipefail && npm run lint 2>&1 | tee /tmp/tsc.log
 
-      - name: TypeScript strict-mode audit (informational, does not fail CI)
-        continue-on-error: true
-        run: set -o pipefail && npx tsc --noEmit --strict --pretty false 2>&1 | tee /tmp/tsc-strict.log
-
-      - name: Report strict-mode audit summary to pull request
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let content = '';
-            try {
-              content = fs.readFileSync('/tmp/tsc-strict.log', 'utf8').trim();
-            } catch {}
-            if (!content) {
-              console.log('Strict-mode audit log empty or missing; nothing to report.');
-              return;
-            }
-            const errorLines = content.split('\n').filter((l) => l.includes('error TS'));
-            if (errorLines.length === 0) {
-              console.log('No strict-mode errors found. Enabling strict in tsconfig.json is unblocked.');
-              return;
-            }
-            const body = 'TypeScript `--strict` audit (informational, does not fail CI): ' +
-              errorLines.length + ' error(s). Full list is in the job log.\n\n' +
-              '<details><summary>first 40 errors</summary>\n\n```\n' +
-              errorLines.slice(0, 40).join('\n') +
-              '\n```\n</details>';
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
-            });
-
       - name: Verify PostgreSQL 10-Table Schema & Backup Script
         run: set -o pipefail && bash ./scripts/backup-restore.sh verify-schema 2>&1 | tee /tmp/schema.log
 
@@ -173,7 +138,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const logs = ['install', 'eslint', 'tsc', 'tsc-strict', 'schema', 'test', 'testpg', 'build', 'docker'];
+            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'testpg', 'build', 'docker'];
             let body = 'CI failed. Captured step output:\n';
             for (const name of logs) {
               try {

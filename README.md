@@ -74,7 +74,7 @@ Never point `SQL_*` (or the tests) at production: the tests write synthetic rows
 2. `docker-compose-runtime` — boots the real compose stack (`postgres:18-alpine` + the app container), probes `/api/v1/health/live` and `/api/v1/health/ready`, then stops PostgreSQL to verify the outage honestly (readiness must report 503 while liveness stays 200), restarts PostgreSQL and proves readiness recovers plus a real SQL query works through the app's own pool, then verifies SIGTERM graceful shutdown (drain log line + exit code 0). Runs entirely on disposable containers/volumes.
 3. `npm-lockfile` — regenerates and validates `package-lock.json` with a clean `npm ci` and keeps it committed to the branch.
 
-CI also runs an informational TypeScript `--strict` audit (non-blocking) and posts the measured error list to the PR, so the strict-mode gap is tracked with real data instead of assumptions.
+TypeScript `strict` mode is enabled in `tsconfig.json` and enforced by the CI type-check on every push (a temporary informational `--strict` audit first measured a zero-error surface before it was enabled).
 
 ### Testcontainers decision (evaluated, intentionally not added)
 
