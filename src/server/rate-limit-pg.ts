@@ -26,11 +26,22 @@ export interface RateLimitBucket {
 }
 
 export class PostgresRateLimitStore {
-  constructor(private readonly windowMs: number) {}
+  /**
+   * @param windowMs Fixed window length in milliseconds.
+   * @param keyPrefix Optional namespace for the bucket key. express-rate-limit
+   *   forbids sharing one store instance across limiters, and distinct
+   *   prefixes keep each limiter window counter independent in the shared
+   *   `rate_limit_buckets` table (e.g. 'std' vs 'sens').
+   */
+  constructor(
+    private readonly windowMs: number,
+    private readonly keyPrefix = ''
+  ) {}
 
   private bucketKey(key: string): string {
     // Keys are short hashes already; cap defensively.
-    return key.slice(0, 200);
+    const namespaced = this.keyPrefix ? `${this.keyPrefix}:${key}` : key;
+    return namespaced.slice(0, 200);
   }
 
   /** Atomic window increment: one UPSERT, race-free across instances. */

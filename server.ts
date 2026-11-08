@@ -439,10 +439,16 @@ export async function createGoGoApp() {
   app.use(express.json({ limit: '50kb' }));
 
   // 3. Hardened Rate Limiters with Custom Anti-Spoofing KeyGenerator & Active Validations
-  // PostgreSQL mode uses a shared, atomic bucket store so limits hold across
+  // PostgreSQL mode uses shared, atomic bucket stores so limits hold across
   // all Cloud Run instances (no per-instance MemoryStore multiplication).
-  const sharedLimitStore =
-    activeStore.mode === 'postgres' ? new PostgresRateLimitStore(60 * 1000) : undefined;
+  // Each limiter gets its OWN store instance with a unique key prefix:
+  // express-rate-limit forbids sharing one store across limiters
+  // (ERR_ERL_STORE_REUSE), and distinct prefixes keep the 180/min and 30/min
+  // counters independent.
+  const standardLimitStore =
+    activeStore.mode === 'postgres' ? new PostgresRateLimitStore(60 * 1000, 'std') : undefined;
+  const sensitiveLimitStore =
+    activeStore.mode === 'postgres' ? new PostgresRateLimitStore(60 * 1000, 'sens') : undefined;
   const standardApiLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 180,
@@ -452,7 +458,7 @@ export async function createGoGoApp() {
     validate: {
       default: true,
     },
-    ...(sharedLimitStore ? { store: sharedLimitStore as never } : {}),
+        ...(standardLimitStore ? { store: standardLimitStore as never } : {}),
     handler: (req: Request, res: Response) => {
       store()
         .recordSecurityEvent(
@@ -482,7 +488,7 @@ export async function createGoGoApp() {
     validate: {
       default: true,
     },
-    ...(sharedLimitStore ? { store: sharedLimitStore as never } : {}),
+        ...(sensitiveLimitStore ? { store: sensitiveLimitStore as never } : {}),
     handler: (req: Request, res: Response) => {
       store()
         .recordSecurityEvent(
@@ -503,7 +509,23 @@ export async function createGoGoApp() {
     },
   });
 
-  app.use('/api/', standardApiLimiter);
+  // Infrastructure liveness/readiness probes are exempt from rate limiting.
+  // The limiter's store is PostgreSQL-backed in production; if the probes were
+  // rate-limited, a database outage would fail the limiter's increment and
+  // 500 even the process-only /health/live probe (found by the deterministic
+  // compose outage test; restart-storm risk on Kubernetes/Cloud Run). Probe
+  // routes answer directly; ALL other /api/* routes stay rate-limited
+  // (REG-18 verifies the 429 limiter still fires on non-probe routes).
+  app.use('/api/', (req: Request, res: Response, next: NextFunction) => {
+    if (
+      req.path === '/v1/health' ||
+      req.path === '/v1/health/live' ||
+      req.path === '/v1/health/ready'
+    ) {
+      return next();
+    }
+    return standardApiLimiter(req, res, next);
+  });
 
   // ============================================================================
   // Versioned REST API Routes (/api/v1)

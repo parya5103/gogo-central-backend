@@ -34,7 +34,7 @@ Note for stacks created before the postgres:18 upgrade: `postgres:18` stores dat
 
 Scope of the Compose stack: `docker-compose.yml` is a local development/demo configuration only, not a production deployment. It ships a documented local development password, and its PostgreSQL host port binds to `127.0.0.1` only (`127.0.0.1:5432:5432`), so the database is reachable from your own machine (psql, DB GUIs) but is never exposed to the LAN or public interfaces. The backend reaches the database over the internal Compose network via the `postgres` service DNS name. Never commit real credentials; production deployment (Cloud Run) is covered separately below.
 
-`npm test` runs 14 live HTTP regression tests (`REG-01`..`REG-14`) against an in-process app instance. It self-activates the `GOGO_ENABLE_SANDBOX_AUTH=true` test opt-in; the deployed server itself keeps sandbox headers disabled by default.
+`npm test` runs the live HTTP regression suite (`REG-01`..`REG-18`) against an in-process app instance. It self-activates the `GOGO_ENABLE_SANDBOX_AUTH=true` test opt-in; the deployed server itself keeps sandbox headers disabled by default.
 
 ---
 
@@ -70,7 +70,7 @@ Never point `SQL_*` (or the tests) at production: the tests write synthetic rows
 
 ### Runtime verification in CI (what is actually executed on every push)
 
-1. `validate-and-test` — `npm ci` install (committed, CI-verified `package-lock.json`), Firestore rules lint, `tsc --noEmit`, schema verify, the `REG-01..REG-17` security/regression suite (`REG-15`..`REG-17` use MOCKED Firebase token verification, always labelled as such), the `PGT-01..PGT-23` integration suite against a real PostgreSQL 18 service, the vite build, the Docker build, and a disposable pg_dump/pg_restore round-trip.
+1. `validate-and-test` — `npm ci` install (committed, CI-verified `package-lock.json`), Firestore rules lint, `tsc --noEmit`, schema verify, the `REG-01..REG-18` security/regression suite (`REG-15`..`REG-17` use MOCKED Firebase token verification, always labelled as such; `REG-18` verifies health-probe/limiter independence), the `PGT-01..PGT-23` integration suite against a real PostgreSQL 18 service, the vite build, the Docker build, and a disposable pg_dump/pg_restore round-trip.
 2. `docker-compose-runtime` — boots the real compose stack (`postgres:18-alpine` + the app container), probes `/api/v1/health/live` and `/api/v1/health/ready`, then stops PostgreSQL to verify the outage honestly (readiness must report 503 while liveness stays 200), restarts PostgreSQL and proves readiness recovers plus a real SQL query works through the app's own pool, then verifies SIGTERM graceful shutdown (drain log line + exit code 0). Runs entirely on disposable containers/volumes.
 3. `npm-lockfile` — regenerates and validates `package-lock.json` with a clean `npm ci` and keeps it committed to the branch.
 
