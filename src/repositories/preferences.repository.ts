@@ -42,10 +42,14 @@ function toRecord(row: PrefRow): NotificationPreferenceRecord {
   };
 }
 
-const PREF_ID = 'user_id || \'_\' || app_id';
 const SELECT_PREFS = `SELECT pref_id, user_id, app_id, enabled, web_push, android_push,
   marketing_alerts, transactional_alerts, quiet_hours_start, quiet_hours_end,
   created_at, updated_at FROM notification_preferences`;
+
+/** Canonical composite key: `${userId}_${appId}` (same id as the engine mode). */
+function prefId(userId: string, appId: string): string {
+  return `${userId}_${appId}`;
+}
 
 export async function getPreference(
   userId: string,
@@ -89,7 +93,7 @@ export async function upsertPreference(
     `INSERT INTO notification_preferences
        (pref_id, user_id, app_id, enabled, web_push, android_push, marketing_alerts,
         transactional_alerts, quiet_hours_start, quiet_hours_end)
-     VALUES (${PREF_ID}, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+     VALUES ($10, $1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (user_id, app_id) DO UPDATE SET
        enabled = EXCLUDED.enabled,
        web_push = EXCLUDED.web_push,
@@ -110,6 +114,7 @@ export async function upsertPreference(
       patch.transactionalAlerts,
       patch.quietHoursStart,
       patch.quietHoursEnd,
+      prefId(userId, appId),
     ]
   );
   const pref = await getPreference(userId, appId);
