@@ -38,22 +38,49 @@ jobs:
       - name: Install dependencies
         # No package-lock.json in the repository (bun.lock only), so npm ci
         # cannot be used. npm install resolves versions from package.json.
-        run: npm install --no-audit --no-fund
+        run: set -o pipefail && npm install --no-audit --no-fund 2>&1 | tee /tmp/install.log
 
       - name: Lint Firestore Zero-Trust Security Rules
-        run: npx eslint firestore.rules
+        run: set -o pipefail && npx eslint firestore.rules 2>&1 | tee /tmp/eslint.log
 
       - name: TypeScript Type-Check (tsc --noEmit)
-        run: npm run lint
+        run: set -o pipefail && npm run lint 2>&1 | tee /tmp/tsc.log
 
       - name: Verify PostgreSQL 10-Table Schema & Backup Script
-        run: bash ./scripts/backup-restore.sh verify-schema
+        run: set -o pipefail && bash ./scripts/backup-restore.sh verify-schema 2>&1 | tee /tmp/schema.log
 
       - name: Run Security Audit & HTTP Regression Test Suite
-        run: npm test
+        run: set -o pipefail && npm test 2>&1 | tee /tmp/test.log
 
       - name: Build Production Frontend Bundle
-        run: npm run build
+        run: set -o pipefail && npm run build 2>&1 | tee /tmp/build.log
 
       - name: Validate Multi-Stage Non-Root Docker Build
-        run: docker build -t gogo-central-backend:ci-test .
+        run: set -o pipefail && docker build -t gogo-central-backend:ci-test . 2>&1 | tee /tmp/docker.log
+
+      # Diagnostic: on any step failure, post captured logs as a PR comment so
+      # failures are readable from clients without Actions log access.
+      - name: Report failure details to pull request
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'build', 'docker'];
+            let body = 'CI failed. Captured step output:\n';
+            for (const name of logs) {
+              try {
+                const content = fs.readFileSync(`/tmp/${name}.log`, 'utf8').trim();
+                if (content) {
+                  body += `\n<details><summary>${name}.log (last part)</summary>\n\n\`\`\`\n${
+                    content.length > 4000 ? '...[truncated]...\n' + content.slice(-4000) : content
+                  }\n\`\`\`\n</details>\n`;
+                }
+              } catch {}
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
