@@ -14,7 +14,7 @@ import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
-import { adminAuth, ROOT_ADMIN_EMAIL, FIREBASE_PROJECT_ID } from './src/lib/firebase-admin.ts';
+import { verifyFirebaseIdToken, ROOT_ADMIN_EMAIL, FIREBASE_PROJECT_ID } from './src/lib/firebase-admin.ts';
 import { backendStore } from './src/server/store.ts';
 import {
   resolveDataStore,
@@ -129,8 +129,10 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
     }
 
     try {
-      // checkRevoked = true ensures revoked refresh sessions are immediately rejected
-      const decoded = await adminAuth.verifyIdToken(idToken, true);
+      // checkRevoked = true ensures revoked refresh sessions are immediately rejected.
+      // Delegates to the real adminAuth.verifyIdToken in production; the
+      // GOGO_TEST_IMPORT-guarded seam only substitutes fakes in test runners.
+      const decoded = await verifyFirebaseIdToken(idToken, true);
       const email = decoded.email || '';
       // Admin role comes from trusted server-side records only: the verified
       // root-admin email bootstrap or a server-side admin role row. Clients

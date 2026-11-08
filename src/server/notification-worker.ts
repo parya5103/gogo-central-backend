@@ -17,12 +17,14 @@
  *
  * FCM honesty contract (same as the engine):
  * - demo `fcm_*` tokens → simulated receipts with `simulated:` message IDs
- * - real tokens → adminMessaging.sendEachForMulticast in 500-token chunks
+ * - real tokens → sendFcmMulticast (Admin SDK) in 500-token chunks
+ * - SDK error codes are read from the error's `code` property (canonical
+ *   `messaging/*` string) before falling back to String(error)
  * - FCM_DRY_RUN=true keeps live sends in dry-run mode
  * - Delivery is at-least-once (durable dedup), never claimed exactly-once.
  */
 
-import { adminMessaging } from '../lib/firebase-admin.ts';
+import { sendFcmMulticast } from '../lib/firebase-admin.ts';
 import type {
   NotificationCampaignRecord,
   DeviceTokenRecord,
@@ -68,6 +70,20 @@ import {
 function markDryRunMessageId(messageId: string | null): string | null {
   if (process.env.FCM_DRY_RUN !== 'true' || !messageId) return messageId;
   return `dryrun:${messageId}`.slice(0, 128);
+}
+
+/**
+ * Extracts the machine-readable FCM error code. Firebase SDK errors carry the
+ * canonical `code` property (e.g. messaging/registration-token-not-registered);
+ * String(error) alone renders only the human message, which would defeat
+ * classifyFcmError's substring matching (misclassifying expired tokens as
+ * transient). Falls back to String(error) for non-SDK error shapes.
+ */
+function extractFcmErrorCode(error: unknown): string {
+  if (error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string') {
+    return (error as { code: string }).code;
+  }
+  return error ? String(error) : 'messaging/unknown-error';
 }
 
 const FCM_MULTICAST_CHUNK = 500;
@@ -249,7 +265,7 @@ export class NotificationWorker {
     for (let i = 0; i < realDevices.length; i += FCM_MULTICAST_CHUNK) {
       const chunk = realDevices.slice(i, i + FCM_MULTICAST_CHUNK);
       try {
-        const response = await adminMessaging.sendEachForMulticast(
+        const response = await sendFcmMulticast(
           {
             tokens: chunk.map((d) => d.fcmToken),
             notification: {
@@ -270,7 +286,7 @@ export class NotificationWorker {
           if (resp.success) {
             await recordReceipt(dev, 'delivered', null, markDryRunMessageId(resp.messageId ?? null), null);
           } else {
-            const errorCode = resp.error ? String(resp.error) : 'messaging/unknown-error';
+            const errorCode = extractFcmErrorCode(resp.error);
             const errorClass = classifyFcmError(errorCode);
             if (errorClass === 'expired') {
               await markDeviceStatus(dev.deviceId, 'expired');
@@ -349,7 +365,7 @@ export class NotificationWorker {
         continue;
       }
       try {
-        const response = await adminMessaging.sendEachForMulticast(
+        const response = await sendFcmMulticast(
           {
             tokens: [device.fcmToken],
             notification: { title: campaign.title, body: campaign.body },
@@ -367,7 +383,7 @@ export class NotificationWorker {
             nextAttemptAt: null,
           });
         } else {
-          const errorCode = resp?.error ? String(resp.error) : 'messaging/unknown-error';
+          const errorCode = extractFcmErrorCode(resp?.error);
           const errorClass = classifyFcmError(errorCode);
           const newRetryCount = delivery.retryCount + 1;
           const finalStatus =

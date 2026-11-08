@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * GoGo Central Backend — PostgreSQL Integration Tests (PGT-01..PGT-22)
+ * GoGo Central Backend — PostgreSQL Integration Tests (PGT-01..PGT-23)
  *
  * REAL database tests, no mocks and no SQLite substitutes. Runs against a
  * disposable PostgreSQL instance configured via SQL_* environment variables
@@ -43,6 +43,7 @@ import { PostgresRateLimitStore } from '../src/server/rate-limit-pg.ts';
 import { NotificationWorker } from '../src/server/notification-worker.ts';
 import { isInQuietHours, isValidIANATimezone } from '../src/server/campaign-rules.ts';
 import { mapFirebaseSignInProvider } from '../src/server/auth-provider.ts';
+import { setTestFirebaseOverrides } from '../src/lib/firebase-admin.ts';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -890,6 +891,123 @@ async function main(): Promise<void> {
       'anonymous_guest',
       'provider stored verbatim (not re-labelled google.com)'
     );
+  });
+
+  await test('PGT-23', 'MOCKED FCM responses: dry-run marking and honest error classification', async () => {
+    // MOCKED Firebase: the GOGO_TEST_IMPORT-guarded seam replaces only
+    // sendEachForMulticast with deterministic fakes. This exercises the
+    // worker's response handling (dry-run marking, error classification,
+    // receipt honesty); it is NOT live FCM verification.
+    const appId = await isolateApp('fcm');
+    const users = [
+      { uid: `${RUN}_fcmok`, token: 'realtoken_ci_ok_01' },
+      { uid: `${RUN}_fcmreg`, token: 'realtoken_ci_reg_01' },
+      { uid: `${RUN}_fcmunavail`, token: 'realtoken_ci_unavail_01' },
+    ];
+    for (const u of users) {
+      await store.syncUser(u.uid, {
+        displayName: `PG ${u.uid}`,
+        emailMasked: 'pf****@test.dev',
+        emailVerified: true,
+        authProvider: 'password',
+        role: 'user',
+      });
+      await createDevice({
+        deviceId: `dev_${u.uid}`,
+        userId: u.uid,
+        appId,
+        fcmToken: u.token,
+        platform: 'android',
+        userAgent: 'pgt-agent',
+      });
+    }
+
+    const savedDryRun = process.env.FCM_DRY_RUN;
+    process.env.FCM_DRY_RUN = 'true';
+    setTestFirebaseOverrides({
+      sendEachForMulticast: async (message) => {
+        const tokens = (message as unknown as { tokens: string[] }).tokens;
+        return {
+          responses: tokens.map((t) => {
+            if (t.endsWith('_ok_01')) {
+              return { success: true, messageId: 'projects/gogo-ci/messages/MOCK_OK_1' };
+            }
+            if (t.endsWith('_reg_01')) {
+              return {
+                success: false,
+                error: { code: 'messaging/registration-token-not-registered', message: 'MOCK: not registered' },
+              };
+            }
+            return {
+              success: false,
+              error: { code: 'messaging/server-unavailable', message: 'MOCK: unavailable' },
+            };
+          }),
+        };
+      },
+    });
+    try {
+      const c = await insertCampaignIfAbsent({
+        notificationId: `${RUN}_notif_fcm`,
+        idempotencyKey: `${RUN}_fcm_key`,
+        appId,
+        targetType: 'broadcast',
+        targetValue: 'all-users',
+        platform: 'all',
+        title: 'PGT-23',
+        body: 'mocked fcm',
+        deepLink: DEEPLINK,
+        scheduledFor: null,
+        authorId: authorUid,
+        payloadHash: 'f'.repeat(64),
+      });
+      assert(c !== null, 'campaign inserted');
+      const finalCampaign = await worker.processCampaign(c!.notificationId);
+      assert(finalCampaign !== null, 'campaign processed');
+
+      const receipts = await query<{
+        status: string;
+        fcm_message_id: string | null;
+        error_code: string | null;
+        device_id: string;
+      }>(
+        'SELECT status, fcm_message_id, error_code, device_id FROM notification_deliveries WHERE notification_id = $1',
+        [c!.notificationId]
+      );
+      assertEqual(receipts.length, 3, 'one receipt per device');
+      const byDevice = new Map(receipts.map((r) => [r.device_id, r]));
+
+      const ok = byDevice.get(`dev_${RUN}_fcmok`);
+      assertEqual(ok?.status, 'delivered', 'successful mocked send recorded delivered');
+      assert(
+        (ok?.fcm_message_id ?? '').startsWith('dryrun:'),
+        `dry-run receipt must carry the dryrun: prefix (got ${ok?.fcm_message_id})`
+      );
+
+      const reg = byDevice.get(`dev_${RUN}_fcmreg`);
+      assertEqual(reg?.status, 'failed_expired_token', 'unregistered token -> failed_expired_token');
+      assert(
+        (reg?.error_code ?? '').includes('registration-token-not-registered'),
+        'canonical SDK error code preserved on the receipt'
+      );
+      const regDevice = await getDevice(`dev_${RUN}_fcmreg`);
+      assertEqual(regDevice?.status, 'expired', 'device marked expired (no retry burn)');
+
+      const unavail = byDevice.get(`dev_${RUN}_fcmunavail`);
+      assertEqual(
+        unavail?.status,
+        'failed_transient',
+        'server-unavailability -> failed_transient (bounded retry)'
+      );
+
+      assertEqual(finalCampaign!.status, 'partial_failure', 'campaign honestly partial_failure');
+      assertEqual(finalCampaign!.sentCount, 1, 'sentCount 1');
+      assertEqual(finalCampaign!.failedCount, 2, 'failedCount 2');
+    } finally {
+      setTestFirebaseOverrides({});
+      if (savedDryRun === undefined) delete process.env.FCM_DRY_RUN;
+      else process.env.FCM_DRY_RUN = savedDryRun;
+    }
   });
 
   await store.close();
