@@ -7,8 +7,10 @@
  * - Tracks applied migrations in a `schema_migrations` table with a sha256
  *   checksum per file.
  * - Applies pending ./migrations/*.sql files in lexicographic order.
- * - Each migration file is responsible for its own BEGIN/COMMIT transaction
- *   (executed via the simple query protocol on a dedicated client).
+ * - The runner owns the transaction: each file's outer BEGIN/COMMIT wrapper
+ *   is stripped at runtime and the DDL plus its schema_migrations record are
+ *   committed atomically on a dedicated client (failure → full rollback:
+ *   nothing applied, nothing recorded).
  * - Re-runs are no-ops (already-applied versions are skipped).
  * - Fails loudly when an applied migration's checksum no longer matches the
  *   file on disk (tampering / partial edits).
@@ -42,6 +44,28 @@ function migrationsDir(): string {
 
 function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf-8').digest('hex');
+}
+
+/**
+ * Strips a migration file's outer `BEGIN;` / `COMMIT;` wrapper so the runner
+ * can wrap the DDL and its schema_migrations record in a single atomic
+ * transaction. Only the first standalone `BEGIN;` line and the last standalone
+ * `COMMIT;` line are removed; `BEGIN` keywords inside dollar-quoted DO blocks
+ * never appear as a standalone `BEGIN;` line and are preserved. Checksums are
+ * computed over the ORIGINAL file text (wrapper included), so already-applied
+ * checksums stay valid.
+ */
+function stripTransactionWrapper(text: string): string {
+  const lines = text.replace(/^\uFEFF/, '').split('\n');
+  const beginIdx = lines.findIndex((line) => /^\s*BEGIN\s*;\s*$/.test(line));
+  if (beginIdx >= 0) lines.splice(beginIdx, 1);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (/^\s*COMMIT\s*;\s*$/.test(lines[i])) {
+      lines.splice(i, 1);
+      break;
+    }
+  }
+  return lines.join('\n');
 }
 
 function listMigrationFiles(): { version: string; name: string; file: string }[] {
@@ -108,14 +132,19 @@ export async function runMigrations(): Promise<MigrationRunReport> {
         continue;
       }
 
-      // Dedicated client per migration; the file itself wraps in BEGIN/COMMIT.
+      // Dedicated client per migration. The runner strips the file's outer
+      // BEGIN/COMMIT wrapper and commits the DDL together with the
+      // schema_migrations record in ONE transaction: a crash can never leave
+      // a migration applied-but-unrecorded or recorded-but-unapplied.
       const client = await pool.connect();
       try {
-        await client.query(text);
+        await client.query('BEGIN');
+        await client.query(stripTransactionWrapper(text));
         await client.query(
           'INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)',
           [migration.version, migration.name, checksum]
         );
+        await client.query('COMMIT');
         applied.push(migration.version);
         console.log(
           JSON.stringify({

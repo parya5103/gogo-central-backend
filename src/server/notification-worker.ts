@@ -59,6 +59,17 @@ import {
   prefSkipReason,
 } from './campaign-rules.ts';
 
+/**
+ * Marks FCM message IDs produced under FCM_DRY_RUN=true so a validation-only
+ * receipt can never be mistaken for a real delivered push (mirrors the
+ * `simulated:` convention used for demo tokens). Capped to the VARCHAR(128)
+ * fcm_message_id column.
+ */
+function markDryRunMessageId(messageId: string | null): string | null {
+  if (process.env.FCM_DRY_RUN !== 'true' || !messageId) return messageId;
+  return `dryrun:${messageId}`.slice(0, 128);
+}
+
 const FCM_MULTICAST_CHUNK = 500;
 
 /** Exponential backoff with jitter: base 2^attempt * (1000ms) ± 25%. */
@@ -257,7 +268,7 @@ export class NotificationWorker {
           const dev = chunk[idx];
           const resp = response.responses[idx];
           if (resp.success) {
-            await recordReceipt(dev, 'delivered', null, resp.messageId ?? null, null);
+            await recordReceipt(dev, 'delivered', null, markDryRunMessageId(resp.messageId ?? null), null);
           } else {
             const errorCode = resp.error ? String(resp.error) : 'messaging/unknown-error';
             const errorClass = classifyFcmError(errorCode);
@@ -351,7 +362,7 @@ export class NotificationWorker {
           await updateDeliveryOutcome(delivery.deliveryId, {
             status: 'delivered',
             errorCode: null,
-            fcmMessageId: resp.messageId ?? null,
+            fcmMessageId: markDryRunMessageId(resp.messageId ?? null),
             retryCount: delivery.retryCount,
             nextAttemptAt: null,
           });
