@@ -122,7 +122,7 @@ export class PostgresDataStore implements GoGoDataStore {
       role: 'user' | 'admin';
     }
   ): Promise<void> {
-    await upsertUserFromFirebase(uid, profile);
+    await upsertUserFromFirebase({ uid, ...profile });
   }
 
   async listUsers(): Promise<CentralUserRecord[]> {

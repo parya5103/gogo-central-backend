@@ -146,7 +146,7 @@ export async function withTransaction<T>(
 /** True connectivity probe with a short timeout. Never throws. */
 export async function checkDatabaseHealth(): Promise<boolean> {
   try {
-    await getPool().query({ text: 'SELECT 1 AS ok', timeout: 3000 });
+    await getPool().query({ text: 'SELECT 1 AS ok', values: [] });
     return true;
   } catch {
     return false;
