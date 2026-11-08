@@ -39,6 +39,13 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Print & verify Node/npm toolchain (engines >=24.12.0)
+        run: |
+          set -euo pipefail
+          echo "node: $(node --version)"
+          echo "npm: $(npm --version)"
+          node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<24||(maj===24&&min<12)) { console.error('FAIL: Node '+process.versions.node+' is below the @firebase/* engines requirement >=24.12.0'); process.exit(1); } console.log('OK: Node '+process.versions.node+' satisfies @firebase/* engines >=24.12.0');"
+
       - name: Install dependencies
         # No package-lock.json in the repository (bun.lock only), so npm ci
         # cannot be used. npm install resolves versions from package.json.
@@ -149,3 +156,153 @@ jobs:
               issue_number: context.issue.number,
               body,
             });
+
+  # ---------------------------------------------------------------------------
+  # Objective: verify the RUNTIME, not just the image build. Starts the real
+  # docker-compose stack (postgres 18 + gogo-backend), probes the live health
+  # endpoints, restarts PostgreSQL and proves the app recovers without dying,
+  # then verifies graceful SIGTERM shutdown with a clean exit code.
+  # ---------------------------------------------------------------------------
+  docker-compose-runtime:
+    name: Docker Compose Runtime (live probes, PG restart, graceful stop)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose config --quiet
+
+      - name: Build & start full stack (postgres + gogo-backend)
+        run: docker compose up --build -d
+
+      - name: Wait for application readiness (/api/v1/health/ready = 200)
+        run: |
+          for i in $(seq 1 120); do
+            if curl -sf --max-time 10 http://localhost:3000/api/v1/health/ready > /dev/null 2>&1; then
+              echo "Application ready after attempt $i."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "FAIL: application never reported ready."
+          docker compose logs --tail 120
+          exit 1
+
+      - name: Verify liveness & readiness endpoints + runtime Node version
+        run: |
+          set -euo pipefail
+          NODE_IN_IMAGE=$(docker exec gogo-central-backend node --version)
+          echo "node in app image: $NODE_IN_IMAGE"
+          docker exec gogo-central-backend node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<24||(maj===24&&min<12)) { console.error('FAIL: runtime Node below @firebase/* engines >=24.12.0'); process.exit(1); } console.log('OK: runtime image Node satisfies engines >=24.12.0');"
+          LIVE=$(curl -sf http://localhost:3000/api/v1/health/live)
+          echo "health/live: $LIVE"
+          echo "$LIVE" | grep -q '"status":"ok"'
+          READY=$(curl -sf http://localhost:3000/api/v1/health/ready)
+          echo "health/ready: $READY"
+          echo "$READY" | grep -q '"database":"connected"'
+
+      - name: PostgreSQL restart: process stays live and readiness recovers
+        run: |
+          set -euo pipefail
+          docker compose restart postgres
+          sleep 3
+          # Liveness is process-only: a database outage must NOT kill the app.
+          LIVE=$(curl -sf --max-time 20 http://localhost:3000/api/v1/health/live)
+          echo "health/live during DB restart: $LIVE"
+          echo "$LIVE" | grep -q '"status":"ok"'
+          # Readiness must honestly report unavailability while PG is down.
+          if curl -sf --max-time 20 http://localhost:3000/api/v1/health/ready > /dev/null 2>&1; then
+            echo "NOTE: PG came back fast; ready already 200 (valid fast recovery)."
+          else
+            echo "Confirmed: readiness reports unavailable during database restart."
+          fi
+          # Recovery: readiness must return to 200 after PG is healthy again.
+          for i in $(seq 1 40); do
+            if curl -sf --max-time 20 http://localhost:3000/api/v1/health/ready > /dev/null 2>&1; then
+              echo "Application recovered after PostgreSQL restart (attempt $i)."
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "FAIL: application did not recover after PostgreSQL restart."
+          docker compose logs --tail 120
+          exit 1
+
+      - name: Graceful shutdown: SIGTERM drains and exits 0
+        run: |
+          set -euo pipefail
+          docker compose stop gogo-backend
+          EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' gogo-central-backend)
+          echo "container exit code after SIGTERM: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "FAIL: container did not exit cleanly."
+            docker logs --tail 60 gogo-central-backend
+            exit 1
+          fi
+          if ! docker logs gogo-central-backend 2>&1 | grep -q "Draining HTTP connections gracefully"; then
+            echo "FAIL: graceful drain log line missing."
+            docker logs --tail 60 gogo-central-backend
+            exit 1
+          fi
+          echo "Graceful shutdown verified: SIGTERM -> drain -> exit 0."
+
+      - name: Teardown (disposable volumes)
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  # ---------------------------------------------------------------------------
+  # Objective: npm reproducibility. Generates package-lock.json with the same
+  # Node/npm toolchain CI uses, validates a clean `npm ci` install from it,
+  # then commits the lockfile back to the branch (plain commit, no force-push)
+  # so CI and Docker can switch to `npm ci` from a verified lockfile.
+  # ---------------------------------------------------------------------------
+  npm-lockfile:
+    name: Generate & Verify package-lock.json (npm ci reproducibility)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout branch head (never the pull_request merge ref)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+
+      - name: Setup Node.js 24 (LTS; matches @firebase/* engines >=24.12.0)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Print toolchain versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Generate package-lock.json (npm install --package-lock-only)
+        run: npm install --package-lock-only --no-audit --no-fund
+
+      - name: Verify clean reproducible install (npm ci)
+        run: npm ci --no-audit --no-fund
+
+      - name: Upload lockfile artifact (fallback for restricted tokens)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-lock-json
+          path: package-lock.json
+          if-no-files-found: error
+
+      - name: Commit lockfile to the branch (plain commit, no force-push)
+        if: github.event_name == 'pull_request'
+        run: |
+          git config user.name "gogo-ci[bot]"
+          git config user.email "actions@github.com"
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "package-lock.json is already up to date; nothing to commit."
+          else
+            git commit -m "chore: generate package-lock.json for reproducible npm ci (Node $(node --version), npm $(npm --version))"
+            git push origin HEAD:${{ github.head_ref }}
+          fi
