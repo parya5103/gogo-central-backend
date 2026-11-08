@@ -47,9 +47,9 @@ jobs:
           node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<24||(maj===24&&min<12)) { console.error('FAIL: Node '+process.versions.node+' is below the @firebase/* engines requirement >=24.12.0'); process.exit(1); } console.log('OK: Node '+process.versions.node+' satisfies @firebase/* engines >=24.12.0');"
 
       - name: Install dependencies
-        # No package-lock.json in the repository (bun.lock only), so npm ci
-        # cannot be used. npm install resolves versions from package.json.
-        run: set -o pipefail && npm install --no-audit --no-fund 2>&1 | tee /tmp/install.log
+        # package-lock.json is committed (generated & npm ci-verified by the
+        # npm-lockfile job), so npm ci is the reproducible install path.
+        run: set -o pipefail && npm ci --no-audit --no-fund 2>&1 | tee /tmp/install.log
 
       - name: Lint Firestore Zero-Trust Security Rules
         run: set -o pipefail && npx eslint firestore.rules 2>&1 | tee /tmp/eslint.log
@@ -167,6 +167,10 @@ jobs:
     name: Docker Compose Runtime (live probes, PG restart, graceful stop)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -247,6 +251,41 @@ jobs:
             exit 1
           fi
           echo "Graceful shutdown verified: SIGTERM -> drain -> exit 0."
+
+      # Diagnostic: this job's step logs are not otherwise readable for private
+      # repositories from mobile clients, so on failure capture the live state
+      # of the stack and post it as a PR comment before teardown destroys it.
+      - name: Report runtime diagnostics to pull request
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const run = (cmd) => {
+              try {
+                return execSync(cmd, { encoding: 'utf8' }).toString();
+              } catch (e) {
+                return String(e.stdout || '') + String(e.stderr || '');
+              }
+            };
+            let body = 'Docker Compose runtime job failed. Live diagnostics:\n';
+            const sections = [
+              ['compose ps', 'docker compose ps -a'],
+              ['app state', 'docker inspect -f "status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} started={{.State.StartedAt}}" gogo-central-backend 2>&1'],
+              ['app last logs', 'docker logs --tail 100 gogo-central-backend 2>&1'],
+              ['postgres last logs', 'docker logs --tail 40 gogo-local-postgres 2>&1'],
+              ['compose config errors', 'docker compose config --quiet 2>&1 || true'],
+            ];
+            for (const [name, cmd] of sections) {
+              const out = run(cmd).trim().slice(-2500) || '(no output)';
+              body += '\n<details><summary>' + name + '</summary>\n\n```\n' + out + '\n```\n</details>\n';
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
 
       - name: Teardown (disposable volumes)
         if: always()

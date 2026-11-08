@@ -18,6 +18,7 @@ import { initializeApp, getApps } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
+import type { MulticastMessage, BatchResponse } from 'firebase-admin/messaging';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 if (!getApps().length) {
@@ -32,21 +33,12 @@ export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
 export const ROOT_ADMIN_EMAIL = 'aaryapratik@gmail.com';
 
 /**
- * Structural types derived from the installed Admin SDK instance. The exact
- * type names exported by firebase-admin/messaging differ across SDK
- * versions; deriving them from the real instance keeps this file compiling
- * against any installed version while remaining fully type-safe.
- */
-type MessagingMulticastMessage = Parameters<typeof adminMessaging.sendEachForMulticast>[0];
-type BatchResponse = Awaited<ReturnType<typeof adminMessaging.sendEachForMulticast>>;
-
-/**
  * TEST-ONLY overrides (guarded by GOGO_TEST_IMPORT). Never settable in
  * production processes; the setter throws outside test runners.
  */
 export interface TestFirebaseOverrides {
   verifyIdToken?: (idToken: string, checkRevoked: boolean) => Promise<unknown>;
-  sendEachForMulticast?: (message: MessagingMulticastMessage, dryRun: boolean) => Promise<unknown>;
+  sendEachForMulticast?: (message: MulticastMessage, dryRun: boolean) => Promise<unknown>;
 }
 
 let testOverrides: TestFirebaseOverrides = {};
@@ -85,7 +77,7 @@ export async function verifyFirebaseIdToken(
  * Admin SDK. Test path (only under GOGO_TEST_IMPORT): the injected fake.
  */
 export async function sendFcmMulticast(
-  message: MessagingMulticastMessage,
+  message: MulticastMessage,
   dryRun: boolean
 ): Promise<BatchResponse> {
   if (testOverrides.sendEachForMulticast) {
