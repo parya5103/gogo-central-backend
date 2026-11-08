@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   ShieldCheck,
   Bell,
@@ -95,6 +95,9 @@ export default function App() {
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
   const [securityEvents, setSecurityEvents] = useState<SecurityEventRecord[]>([]);
   const [systemConfigs, setSystemConfigs] = useState<SystemConfigRecord[]>([]);
+  // Server-reported FCM delivery mode (true = FCM_DRY_RUN=true, receipts are
+  // simulated). null = the overview response carried no flag (older backend).
+  const [fcmDryRun, setFcmDryRun] = useState<boolean | null>(null);
 
   // Automated Test Suite State
   const [testSuiteReport, setTestSuiteReport] = useState<{
@@ -210,6 +213,27 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Ecosystem audience & eligibility summary. Client-side projection of the
+  // admin overview data (products/devices/preferences) - never a fabricated
+  // delivery claim. Eligible = active device whose owner enabled notifications
+  // for that product and enabled the device's platform channel.
+  const audience = useMemo(() => {
+    const byApp: Record<string, { active: number; eligible: number }> = {};
+    for (const p of products) byApp[p.appId] = { active: 0, eligible: 0 };
+    for (const d of devices) {
+      const bucket = byApp[d.appId];
+      if (!bucket || d.status !== 'active') continue;
+      bucket.active += 1;
+      const pref = preferences.find((q) => q.prefId === `${d.userId}_${d.appId}`);
+      if (!pref || !pref.enabled) continue;
+      if (d.platform === 'web' ? !pref.webPush : !pref.androidPush) continue;
+      bucket.eligible += 1;
+    }
+    let ecosystemEligible = 0;
+    for (const appId of Object.keys(byApp)) ecosystemEligible += byApp[appId].eligible;
+    return { byApp, ecosystemEligible };
+  }, [products, devices, preferences]);
+
   const fetchOverview = useCallback(async () => {
     setLoading(true);
     try {
@@ -231,6 +255,7 @@ export default function App() {
       setAuditLogs(data.auditLogs || []);
       setSecurityEvents(data.securityEvents || []);
       setSystemConfigs(data.systemConfigs || []);
+      setFcmDryRun(typeof data.fcmDryRun === 'boolean' ? data.fcmDryRun : null);
     } catch (error) {
       setBannerMessage({
         type: 'error',
@@ -1213,6 +1238,19 @@ export default function App() {
                   <h1 className="text-2xl font-bold text-slate-950 font-display">
                     Central Notification Dispatch &amp; Delivery Tracker
                   </h1>
+                  {fcmDryRun === true ? (
+                    <span className="inline-block mt-2 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-800 border border-amber-300 rounded">
+                      Dry-Run Mode (FCM_DRY_RUN=true) · receipts are simulated, nothing is delivered
+                    </span>
+                  ) : fcmDryRun === false ? (
+                    <span className="inline-block mt-2 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-emerald-100 text-emerald-800 border border-emerald-300 rounded">
+                      Live Mode · real FCM delivery enabled
+                    </span>
+                  ) : (
+                    <span className="inline-block mt-2 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-slate-100 text-slate-600 border border-slate-300 rounded">
+                      Delivery mode unknown · overview response has no fcmDryRun flag
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={() => handleSendNotification(true)}
@@ -1221,6 +1259,41 @@ export default function App() {
                 >
                   Simulate Duplicate Idempotency Request
                 </button>
+              </div>
+
+              <div className="bg-white border border-slate-200 rounded-lg p-5">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                  <h2 className="text-base font-semibold text-slate-950">
+                    Ecosystem Audience &amp; Eligibility
+                  </h2>
+                  <span className="text-xs text-slate-500">
+                    Eligible = active device + enabled user preference for the product and platform
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {products.map((p) => {
+                    const bucket = audience.byApp[p.appId] || { active: 0, eligible: 0 };
+                    return (
+                      <div key={p.appId} className="border border-slate-200 rounded-lg p-3">
+                        <div className="text-xs text-slate-500 mb-1 truncate font-mono">
+                          {p.appId}
+                        </div>
+                        <div className="text-lg font-bold text-slate-950 tabular-nums">
+                          {bucket.eligible}
+                        </div>
+                        <div className="text-[10px] text-slate-500">
+                          eligible · {bucket.active} active
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-3 text-xs text-slate-600">
+                  Ecosystem-wide eligible devices:{' '}
+                  <strong className="tabular-nums text-slate-950">
+                    {audience.ecosystemEligible}
+                  </strong>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -1392,6 +1465,26 @@ export default function App() {
                         required
                         className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
                       />
+                    </div>
+                  </div>
+
+                  <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+                    <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">
+                      Notification Preview (as composed)
+                    </div>
+                    <div className="flex items-start gap-2.5">
+                      <Bell className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-900 truncate">
+                          {notifTitle || '(untitled)'}
+                        </div>
+                        <div className="text-[11px] text-slate-600 break-words">
+                          {notifBody || '(no body)'}
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-mono truncate mt-0.5">
+                          {notifDeepLink}
+                        </div>
+                      </div>
                     </div>
                   </div>
 

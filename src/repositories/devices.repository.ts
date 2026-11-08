@@ -79,8 +79,16 @@ export async function createDevice(params: {
   const rows = await query<{ device_id: string }>(
     `INSERT INTO device_tokens (device_id, user_id, app_id, fcm_token, platform, user_agent)
      VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (device_id) DO UPDATE SET
-       fcm_token = EXCLUDED.fcm_token,
+     -- Token-unique upsert: registering the SAME FCM token (web token
+     -- refresh, re-opt-in, returning device) refreshes its existing row
+     -- instead of violating the global UNIQUE (fcm_token) constraint
+     -- (23505 -> HTTP 500). device_id is deliberately NOT overwritten: the
+     -- refresh keeps the original stable device identity for audit
+     -- continuity, and one token can never occupy two rows (structurally
+     -- prevents duplicate delivery to the same device).
+     ON CONFLICT (fcm_token) DO UPDATE SET
+       app_id = EXCLUDED.app_id,
+       user_id = EXCLUDED.user_id,
        platform = EXCLUDED.platform,
        user_agent = EXCLUDED.user_agent,
        status = 'active',

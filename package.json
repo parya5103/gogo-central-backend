@@ -1,7 +1,7 @@
 {
   "name": "gogo-central-backend",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -9,6 +9,7 @@
     "start": "node --import tsx server.ts",
     "test": "GOGO_TEST_IMPORT=true tsx tests/security-audit.test.ts",
     "test:pg": "GOGO_TEST_IMPORT=true tsx tests/postgres-integration.test.ts",
+    "test:matrix": "GOGO_TEST_IMPORT=true tsx tests/notification-matrix.test.ts",
     "db:verify": "tsx scripts/db-manager.ts verify",
     "db:migrate": "tsx scripts/db-manager.ts migrate",
     "db:backup": "tsx scripts/db-manager.ts backup",

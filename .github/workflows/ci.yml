@@ -73,6 +73,16 @@ jobs:
           FCM_DRY_RUN: 'true'
         run: set -o pipefail && npm run test:pg 2>&1 | tee /tmp/testpg.log
 
+      - name: Notification Matrix Tests (five-product targeting; MOCKED FCM seam, clearly labelled)
+        env:
+          SQL_HOST: 127.0.0.1
+          SQL_PORT: '5432'
+          SQL_DB_NAME: gogo_central
+          SQL_USER: gogo_app_user
+          SQL_PASSWORD: ci_test_password
+          FCM_DRY_RUN: 'true'
+        run: set -o pipefail && npm run test:matrix 2>&1 | tee /tmp/testmatrix.log
+
       - name: Build Production Frontend Bundle
         run: set -o pipefail && npm run build 2>&1 | tee /tmp/build.log
 
@@ -138,7 +148,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'testpg', 'build', 'docker'];
+            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'testpg', 'testmatrix', 'build', 'docker'];
             let body = 'CI failed. Captured step output:\n';
             for (const name of logs) {
               try {
