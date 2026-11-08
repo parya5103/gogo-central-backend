@@ -21,6 +21,7 @@ import {
   type GoGoDataStore,
 } from './src/server/data-store.ts';
 import { PostgresRateLimitStore } from './src/server/rate-limit-pg.ts';
+import { mapFirebaseSignInProvider } from './src/server/auth-provider.ts';
 import {
   resolvePostgresConfig,
   verifyPostgresMigrationFile,
@@ -138,6 +139,28 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         (email === ROOT_ADMIN_EMAIL && decoded.email_verified === true) ||
         (await store().isAdminUid(decoded.uid));
 
+      // Provider is read from the VERIFIED token's own claim
+      // (decoded.firebase.sign_in_provider) — never hardcoded, never
+      // client-supplied. Unsupported providers are rejected (fail closed).
+      const authProvider = mapFirebaseSignInProvider(decoded);
+      if (!authProvider) {
+        const rawProvider =
+          (decoded as { firebase?: { sign_in_provider?: string } }).firebase
+            ?.sign_in_provider ?? 'missing';
+        await store().recordSecurityEvent(
+          'UNVERIFIED_TOKEN_BLOCKED',
+          String(req.headers['x-gogo-app-id'] || 'central-control'),
+          `${req.method} ${req.originalUrl}`,
+          'high',
+          `Rejected verified token with unsupported sign-in provider (${rawProvider.slice(0, 32)}).`,
+          extractTrustedClientIp(req)
+        );
+        return res.status(401).json({
+          error: 'Unauthorized: Firebase sign-in provider is not supported by GoGo Central.',
+          code: 'AUTH_PROVIDER_NOT_SUPPORTED',
+        });
+      }
+
       req.user = {
         uid: decoded.uid,
         email,
@@ -154,7 +177,7 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
           ? `${email.slice(0, 2)}***@${email.split('@')[1] || 'gogo.in'}`
           : 'verified@gogo.in',
         emailVerified: Boolean(decoded.email_verified),
-        authProvider: 'google.com',
+        authProvider,
         role: isAdmin ? 'admin' : 'user',
       });
 
