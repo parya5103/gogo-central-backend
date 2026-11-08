@@ -76,6 +76,24 @@ explicit `SQL_*` variables. The resolution order above applies unchanged,
 so the same code runs locally against `.env.local` and on Cloud Run
 against Secret Manager values.
 
+## GitHub Actions: Neon preview branch per PR
+
+`.github/workflows/neon_workflow.yml` creates a Neon preview branch named
+`preview/pr-<number>-<branch>` for every pull request (opened, reopened,
+synchronize) with a 14-day expiry, and deletes it when the PR closes.
+
+It requires two repository settings (Settings > Secrets and variables >
+Actions), both owned by the Neon project:
+
+- Secret `NEON_API_KEY`: create in the Neon Console under Account settings
+  > API keys.
+- Variable `NEON_PROJECT_ID`: the Neon project id (`rapid-flower-44795642`).
+
+Without these, the create/delete steps fail on PR events; the main CI
+workflow is unaffected. Preview branches are visible on the Branches page
+of the Neon Console. The branch DATABASE_URL (`db_url_with_pooler`) is
+available for future PR-time migrations or preview deployments.
+
 ## Cost
 
 Neon Free Tier: 0.5 GB storage, 100 compute-hours per month. The pool is
