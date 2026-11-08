@@ -36,17 +36,22 @@ export interface AuthenticatedRequest extends Request {
   };
 }
 
-// Strict GoGo Ecosystem CORS Allowlist
-const ALLOWED_GOGO_ORIGINS = new Set([
+// Strict GoGo Ecosystem CORS Allowlist.
+// Base allowlist covers the apex + www GoGo domain and local development.
+// CORS_ALLOWED_ORIGINS (comma-separated HTTPS origins) extends the allowlist at
+// runtime so new origins are added via environment configuration, not code.
+const ALLOWED_GOGO_ORIGINS = new Set<string>([
   'https://gogocompany.in',
   'https://www.gogocompany.in',
-  'https://sarkarisaathi.com',
-  'https://pikanews.gogocompany.in',
-  'https://arrowout.gogocompany.in',
-  'https://crystalquest.gogocompany.in',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
 ]);
+for (const extraOrigin of (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean)) {
+  ALLOWED_GOGO_ORIGINS.add(extraOrigin);
+}
 
 /**
  * Extracts the true client IP behind Google Cloud Run / Reverse Proxy without trusting
@@ -149,7 +154,8 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         String(req.headers['x-gogo-app-id'] || 'central-control'),
         `${req.method} ${req.originalUrl}`,
         'high',
-        `Rejected Firebase Bearer token (${errCode}) via adminAuth.verifyIdToken(token, true).`
+        `Rejected Firebase Bearer token (${errCode}) via adminAuth.verifyIdToken(token, true).`,
+        extractTrustedClientIp(req)
       );
       return res.status(401).json({
         error:
@@ -161,7 +167,8 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
     }
   }
 
-  // Sandbox Role Header: Strictly forbidden in production
+  // Sandbox Role Header: forbidden in production and by default everywhere.
+  // Opt-in only for local testing via GOGO_ENABLE_SANDBOX_AUTH=true.
   const sandboxRole = req.headers['x-gogo-sandbox-role'];
   if (sandboxRole) {
     if (isProductionMode(req)) {
@@ -170,11 +177,27 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         String(req.headers['x-gogo-app-id'] || 'central-control'),
         `${req.method} ${req.originalUrl}`,
         'critical',
-        'Blocked attempt to use X-GoGo-Sandbox-Role header in production mode.'
+        'Blocked attempt to use X-GoGo-Sandbox-Role header in production mode.',
+        extractTrustedClientIp(req)
       );
       return res.status(401).json({
         error: 'Unauthorized: Sandbox authentication headers are disabled in production.',
         code: 'AUTH_SANDBOX_DISABLED_IN_PROD',
+      });
+    }
+
+    if (process.env.GOGO_ENABLE_SANDBOX_AUTH !== 'true') {
+      backendStore.recordSecurityEvent(
+        'UNVERIFIED_TOKEN_BLOCKED',
+        String(req.headers['x-gogo-app-id'] || 'central-control'),
+        `${req.method} ${req.originalUrl}`,
+        'high',
+        'Blocked X-GoGo-Sandbox-Role header: GOGO_ENABLE_SANDBOX_AUTH is not enabled.',
+        extractTrustedClientIp(req)
+      );
+      return res.status(401).json({
+        error: 'Unauthorized: Sandbox authentication headers are disabled.',
+        code: 'AUTH_SANDBOX_DISABLED',
       });
     }
 
@@ -196,7 +219,8 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
     String(req.headers['x-gogo-app-id'] || 'central-control'),
     `${req.method} ${req.originalUrl}`,
     'medium',
-    'Blocked request missing Authorization Bearer header.'
+    'Blocked request missing Authorization Bearer header.',
+    extractTrustedClientIp(req)
   );
   return res.status(401).json({
     error: 'Unauthorized: Missing Authorization Bearer Firebase ID Token.',
@@ -214,7 +238,8 @@ function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFuncti
       String(req.headers['x-gogo-app-id'] || 'central-control'),
       `${req.method} ${req.originalUrl}`,
       'high',
-      `Blocked non-admin UID (${req.user?.uid || 'anonymous'}) from invoking admin endpoint.`
+      `Blocked non-admin UID (${req.user?.uid || 'anonymous'}) from invoking admin endpoint.`,
+      extractTrustedClientIp(req)
     );
     return res.status(403).json({
       error: 'Forbidden: Server-side admin role verification failed.',
@@ -310,7 +335,7 @@ export async function createGoGoApp() {
   // 2. Strict CORS Policy for GoGo Domains + Cloud Run Preview
   app.use(
     cors({
-      origin: (origin, callback) => {
+      origin: (origin, req, callback) => {
         if (!origin) {
           return callback(null, true);
         }
@@ -338,7 +363,8 @@ export async function createGoGoApp() {
           'central-control',
           'CORS Preflight',
           'medium',
-          `Blocked unauthorized cross-origin request from ${origin}`
+          `Blocked unauthorized cross-origin request from ${origin}`,
+          extractTrustedClientIp(req)
         );
         return callback(new Error('Not allowed by GoGo Central Backend CORS policy'));
       },
@@ -364,7 +390,8 @@ export async function createGoGoApp() {
         String(req.headers['x-gogo-app-id'] || 'central-control'),
         `${req.method} ${req.originalUrl}`,
         'medium',
-        'Rate limit exceeded on standard API route (180 req/min).'
+        'Rate limit exceeded on standard API route (180 req/min).',
+        extractTrustedClientIp(req)
       );
       res.status(429).json({
         error: 'Too many requests. Please try again in 60 seconds.',
@@ -388,7 +415,8 @@ export async function createGoGoApp() {
         String(req.headers['x-gogo-app-id'] || 'central-control'),
         `${req.method} ${req.originalUrl}`,
         'high',
-        'Rate limit exceeded on sensitive mutation route (30 req/min).'
+        'Rate limit exceeded on sensitive mutation route (30 req/min).',
+        extractTrustedClientIp(req)
       );
       res.status(429).json({
         error: 'Rate limit exceeded for sensitive operation. Please wait 60 seconds.',
@@ -669,7 +697,8 @@ export async function createGoGoApp() {
           device.appId,
           `DELETE /api/v1/devices/${deviceId}`,
           'high',
-          `Blocked user ${req.user!.uid} from revoking device token belonging to ${device.userId}.`
+          `Blocked user ${req.user!.uid} from revoking device token belonging to ${device.userId}.`,
+          extractTrustedClientIp(req)
         );
         return res
           .status(403)
@@ -792,9 +821,9 @@ export async function createGoGoApp() {
     sensitiveMutationLimiter,
     requireAuth,
     requireAdmin,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const notificationId = String(req.params.notificationId);
-      const outcome = backendStore.retryFailedCampaign(notificationId, req.user!.uid);
+      const outcome = await backendStore.retryFailedCampaign(notificationId, req.user!.uid);
       if (!outcome.campaign) {
         return res.status(404).json({ error: 'Notification campaign not found.' });
       }
@@ -802,6 +831,44 @@ export async function createGoGoApp() {
         return res.status(409).json({ error: outcome.error, campaign: outcome.campaign });
       }
       return res.json({ campaign: outcome.campaign });
+    }
+  );
+
+  // Read Audit Logs (Admin Only, Bounded)
+  app.get(
+    '/api/v1/audit-logs',
+    standardApiLimiter,
+    requireAuth,
+    requireAdmin,
+    (req: AuthenticatedRequest, res: Response) => {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || '50'), 10) || 50, 1), 200);
+      const logs = backendStore.auditLogs.slice(0, limit);
+      return res.json({ auditLogs: logs, count: logs.length, total: backendStore.auditLogs.length });
+    }
+  );
+
+  // Read Security Events (Admin Only, Bounded)
+  app.get(
+    '/api/v1/security-events',
+    standardApiLimiter,
+    requireAuth,
+    requireAdmin,
+    (req: AuthenticatedRequest, res: Response) => {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || '50'), 10) || 50, 1), 200);
+      const events = backendStore.securityEvents.slice(0, limit);
+      return res.json({ securityEvents: events, count: events.length, total: backendStore.securityEvents.length });
+    }
+  );
+
+  // Read System Configuration (Admin Only)
+  app.get(
+    '/api/v1/system-config',
+    standardApiLimiter,
+    requireAuth,
+    requireAdmin,
+    (req: AuthenticatedRequest, res: Response) => {
+      const configs = Array.from(backendStore.systemConfigs.values());
+      return res.json({ systemConfigs: configs, count: configs.length });
     }
   );
 
@@ -853,7 +920,8 @@ export async function createGoGoApp() {
           'central-control',
           'POST /api/v1/tests/run',
           'high',
-          'Blocked invocation of diagnostic self-test runner in production mode.'
+          'Blocked invocation of diagnostic self-test runner in production mode.',
+          extractTrustedClientIp(req)
         );
         return res.status(403).json({
           error: 'Diagnostic test runner is disabled in production.',
@@ -1001,6 +1069,7 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       })
     );
+    backendStore.stopScheduler();
     server.close(() => {
       process.exit(0);
     });
