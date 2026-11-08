@@ -30,6 +30,8 @@ curl http://localhost:3000/api/v1/health
 npm test
 ```
 
+Note for stacks created before the postgres:18 upgrade: `postgres:18` stores data under version-specific subdirectories and the compose volume now mounts at `/var/lib/postgresql`. Recreate old local volumes (`docker compose down -v`) or migrate them with `pg_dump` before switching.
+
 `npm test` runs 14 live HTTP regression tests (`REG-01`..`REG-14`) against an in-process app instance. It self-activates the `GOGO_ENABLE_SANDBOX_AUTH=true` test opt-in; the deployed server itself keeps sandbox headers disabled by default.
 
 ---
@@ -63,6 +65,26 @@ npm run test:pg
 ```
 
 Never point `SQL_*` (or the tests) at production: the tests write synthetic rows.
+
+### Runtime verification in CI (what is actually executed on every push)
+
+1. `validate-and-test` — `npm ci` install (committed, CI-verified `package-lock.json`), Firestore rules lint, `tsc --noEmit`, schema verify, the `REG-01..REG-17` security/regression suite (`REG-15`..`REG-17` use MOCKED Firebase token verification, always labelled as such), the `PGT-01..PGT-23` integration suite against a real PostgreSQL 18 service, the vite build, the Docker build, and a disposable pg_dump/pg_restore round-trip.
+2. `docker-compose-runtime` — boots the real compose stack (`postgres:18-alpine` + the app container), probes `/api/v1/health/live` and `/api/v1/health/ready`, restarts PostgreSQL and proves the process stays live while readiness recovers, then verifies SIGTERM graceful shutdown (drain log line + exit code 0). Runs entirely on disposable containers/volumes.
+3. `npm-lockfile` — regenerates and validates `package-lock.json` with a clean `npm ci` and keeps it committed to the branch.
+
+CI also prints `node --version`/`npm --version` and fails if the toolchain is below the installed `@firebase/*` engines requirement (>=24.12.0), inside the test job and inside the running container.
+
+### Manual real-Firebase verification (NOT executable in CI — requires your credentials)
+
+CI has no Firebase credentials: every Firebase/FCM path in CI is either MOCKED (explicitly labelled) or fails closed. To verify against the real Firebase project later:
+
+1. Generate the Firebase service-account key (Firebase console → Project settings → Service accounts → Generate new private key) for the shared GoGo project.
+2. Point the environment at it: `export GOOGLE_APPLICATION_CREDENTIALS=/path/to/serviceAccount.json`
+3. Start the stack: `docker compose up --build` (compose defaults to `FCM_DRY_RUN=true`: requests are validated by Firebase without delivering pushes).
+4. Verify a real ID token minted by one of the GoGo apps:
+   `curl -X POST http://localhost:3000/api/v1/auth/verify -H "Authorization: Bearer <REAL_ID_TOKEN>" -H "Content-Type: application/json" -d '{"appId":"gogocompany-in"}'`
+   Expect `200` with the server-computed role. Revoke the session in Firebase Auth and repeat: the response must be `401 AUTH_TOKEN_REVOKED` (revocation is enforced with `checkRevoked=true`).
+5. Register a real device/browser FCM token via `POST /api/v1/devices/register`, then dispatch a campaign with `FCM_DRY_RUN=false` (compose env override) and confirm the push arrives and its receipt carries a real (non-`dryrun:`-prefixed) message ID.
 
 ---
 

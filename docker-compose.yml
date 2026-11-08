@@ -10,7 +10,11 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - gogo_pg_data:/var/lib/postgresql/data
+      # postgres:18 images store data in version-specific subdirectories, so
+      # the canonical mount point is /var/lib/postgresql (NOT .../data —
+      # mounting data/ makes postgres 18 refuse to start). See
+      # https://github.com/docker-library/postgres/pull/1259
+      - gogo_pg_data:/var/lib/postgresql
       - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U gogo_app_user -d gogo_central"]
