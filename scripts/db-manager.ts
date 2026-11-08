@@ -11,6 +11,8 @@
  *   npm run db:restore [path/to/backup.sql]
  */
 
+// Load .env.local / .env before resolving configuration (see src/lib/load-env.ts).
+import '../src/lib/load-env.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import {

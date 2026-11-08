@@ -14,7 +14,7 @@
  */
 
 import { Pool, PoolClient, QueryResultRow } from 'pg';
-import { resolvePostgresConfig } from './postgres-config.ts';
+import { resolvePostgresConfig, resolvePgPassword } from './postgres-config.ts';
 
 export class DatabaseUnavailableError extends Error {
   public readonly sanitizedCode: string;
@@ -46,7 +46,7 @@ export function getPool(): Pool {
 
   const provider = resolvePostgresConfig();
   const { statementTimeoutMs, queryTimeoutMs } = runtimeOptions();
-  const password = process.env.SQL_PASSWORD || '';
+  const password = resolvePgPassword();
 
   pool = new Pool({
     host: provider.host,

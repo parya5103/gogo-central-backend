@@ -7,6 +7,11 @@
  *   1. Local PostgreSQL 18 (Docker Compose postgres:18-alpine or Android Termux native postgresql)
  *   2. Google Cloud SQL for PostgreSQL 18 (Unix socket /cloudsql/... or Private IP)
  *   3. Neon Serverless PostgreSQL (Free Tier 0.5 GB with TLS SNI pooling)
+ *
+ * Also accepts a standard DATABASE_URL connection string (postgresql://...),
+ * the format the Neon CLI injects via `neon deploy` into .env.local and the
+ * format most hosts use. Explicit SQL_* variables always take precedence;
+ * DATABASE_URL only fills in whatever SQL_* leaves unset.
  */
 
 import fs from 'node:fs';
@@ -35,10 +40,73 @@ export interface ProviderIndependentPgConfig {
   notes: string;
 }
 
+/** Secrets parsed from a DATABASE_URL connection string. Never logged. */
+export interface ParsedDatabaseUrl {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  sslMode: 'disable' | 'require' | 'verify-ca' | 'verify-full' | null;
+}
+
+/**
+ * Parses a postgres:// / postgresql:// connection string (the DATABASE_URL
+ * that the Neon CLI and most hosts inject). Returns null for anything that
+ * is not a valid PostgreSQL URL, so a malformed value degrades safely to the
+ * SQL_* object-method configuration instead of crashing callers (the admin
+ * diagnostics endpoint also resolves this config). The password stays in
+ * memory only; this module never logs it and it is not part of the returned
+ * ProviderIndependentPgConfig (which the /api/v1/db/config endpoint exposes).
+ */
+export function parseDatabaseUrl(raw: string): ParsedDatabaseUrl | null {
+  try {
+    const parsed = new URL(raw.trim());
+    if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+      return null;
+    }
+    const database = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+    if (!parsed.hostname || !database) {
+      return null;
+    }
+    const sslModeRaw = (parsed.searchParams.get('sslmode') || '').toLowerCase();
+    const sslMode: ParsedDatabaseUrl['sslMode'] =
+      sslModeRaw === 'disable' || sslModeRaw === 'require' || sslModeRaw === 'verify-ca' || sslModeRaw === 'verify-full'
+        ? (sslModeRaw as ParsedDatabaseUrl['sslMode'])
+        : null;
+    return {
+      host: parsed.hostname,
+      port: Number(parsed.port) || 5432,
+      database,
+      user: decodeURIComponent(parsed.username || ''),
+      password: decodeURIComponent(parsed.password || ''),
+      sslMode,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves the PostgreSQL password without ever logging or exposing it.
+ * Explicit SQL_PASSWORD (Secret Manager / CI) always wins; otherwise the
+ * password embedded in DATABASE_URL is used.
+ */
+export function resolvePgPassword(): string {
+  if (process.env.SQL_PASSWORD) {
+    return process.env.SQL_PASSWORD;
+  }
+  if (process.env.DATABASE_URL) {
+    return parseDatabaseUrl(process.env.DATABASE_URL)?.password || '';
+  }
+  return '';
+}
+
 export function resolvePostgresConfig(
   overrideProvider?: PostgresProviderType
 ): ProviderIndependentPgConfig {
-  const rawHost = process.env.SQL_HOST || '127.0.0.1';
+  const urlConfig = process.env.DATABASE_URL ? parseDatabaseUrl(process.env.DATABASE_URL) : null;
+  const rawHost = process.env.SQL_HOST || urlConfig?.host || '127.0.0.1';
   const rawProvider = (
     overrideProvider ||
     process.env.PG_PROVIDER ||
@@ -49,10 +117,10 @@ export function resolvePostgresConfig(
       : 'local')
   ) as PostgresProviderType;
 
-  const database = process.env.SQL_DB_NAME || 'gogo_central';
-  const user = process.env.SQL_USER || 'gogo_app_user';
+  const database = process.env.SQL_DB_NAME || urlConfig?.database || 'gogo_central';
+  const user = process.env.SQL_USER || urlConfig?.user || 'gogo_app_user';
   const adminUser = process.env.SQL_ADMIN_USER || 'gogo_admin_user';
-  const port = Number(process.env.SQL_PORT) || 5432;
+  const port = Number(process.env.SQL_PORT) || urlConfig?.port || 5432;
 
   if (rawProvider === 'cloudsql') {
     const isSocket = rawHost.startsWith('/cloudsql/');
@@ -109,7 +177,16 @@ export function resolvePostgresConfig(
     database,
     user,
     AdminUser: adminUser,
-    ssl: false,
+    // A DATABASE_URL with sslmode=require/verify-* demands TLS even when
+    // the provider resolves to 'local' (host not *.neon.tech, not /cloudsql).
+    // sslmode=require means "encrypt, do not verify"; verify-* verifies the
+    // server certificate chain.
+    ssl:
+      urlConfig?.sslMode === 'verify-full' || urlConfig?.sslMode === 'verify-ca'
+        ? { rejectUnauthorized: true }
+        : urlConfig?.sslMode === 'require'
+        ? { rejectUnauthorized: false }
+        : false,
     pool: {
       max: 10,
       min: 0,

@@ -25,5 +25,9 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "exclude": ["dist"]
+  // neon.ts is the Neon CLI's declarative config (authored by `neon init`,
+  // applied by `neon deploy` via the CLI's own runtime). It imports
+  // @neon/config, which is a CLI-managed dependency, not an app dependency,
+  // so it is excluded from the app type check.
+  "exclude": ["dist", "neon.ts"]
 }
