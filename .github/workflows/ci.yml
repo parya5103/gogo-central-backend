@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, 'fix/**', 'feat/**']
 
 jobs:
   validate-and-test:
@@ -34,15 +34,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
+      - name: Setup Node.js 24 (LTS; matches @firebase/* engines >=24.12.0)
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
+
+      - name: Print & verify Node/npm toolchain (engines >=24.12.0)
+        run: |
+          set -euo pipefail
+          echo "node: $(node --version)"
+          echo "npm: $(npm --version)"
+          node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<24||(maj===24&&min<12)) { console.error('FAIL: Node '+process.versions.node+' is below the @firebase/* engines requirement >=24.12.0'); process.exit(1); } console.log('OK: Node '+process.versions.node+' satisfies @firebase/* engines >=24.12.0');"
 
       - name: Install dependencies
-        # No package-lock.json in the repository (bun.lock only), so npm ci
-        # cannot be used. npm install resolves versions from package.json.
-        run: set -o pipefail && npm install --no-audit --no-fund 2>&1 | tee /tmp/install.log
+        # package-lock.json is committed (generated & npm ci-verified by the
+        # npm-lockfile job), so npm ci is the reproducible install path.
+        run: set -o pipefail && npm ci --no-audit --no-fund 2>&1 | tee /tmp/install.log
 
       - name: Lint Firestore Zero-Trust Security Rules
         run: set -o pipefail && npx eslint firestore.rules 2>&1 | tee /tmp/eslint.log
@@ -56,11 +63,72 @@ jobs:
       - name: Run Security Audit & HTTP Regression Test Suite
         run: set -o pipefail && npm test 2>&1 | tee /tmp/test.log
 
+      - name: PostgreSQL Integration Tests (real database, no mocks)
+        env:
+          SQL_HOST: 127.0.0.1
+          SQL_PORT: '5432'
+          SQL_DB_NAME: gogo_central
+          SQL_USER: gogo_app_user
+          SQL_PASSWORD: ci_test_password
+          FCM_DRY_RUN: 'true'
+        run: set -o pipefail && npm run test:pg 2>&1 | tee /tmp/testpg.log
+
       - name: Build Production Frontend Bundle
         run: set -o pipefail && npm run build 2>&1 | tee /tmp/build.log
 
       - name: Validate Multi-Stage Non-Root Docker Build
         run: set -o pipefail && docker build -t gogo-central-backend:ci-test . 2>&1 | tee /tmp/docker.log
+
+      # Phase 8 requirement: a backup is only verified once it has been
+      # restored into a SEPARATE disposable PostgreSQL database. This dumps the
+      # CI integration database (pg_dump custom format), restores it into a
+      # throwaway container, and compares row counts. Never production data.
+      - name: Backup & Disposable-Database Restore Verification (pg_dump/pg_restore)
+        run: |
+          set -euo pipefail
+          mkdir -p backups
+          # 1. Custom-format backup of the CI database.
+          docker run --rm --network host -e PGPASSWORD=ci_test_password -v "$PWD/backups:/backups" postgres:18-alpine \
+            pg_dump -h 127.0.0.1 -U gogo_app_user -d gogo_central -Fc -f /backups/ci-backup.dump
+          echo "pg_dump completed: $(du -h backups/ci-backup.dump | cut -f1)"
+          # 2. Disposable restore target (isolated container network).
+          docker network create ci-pgnet
+          docker run -d --name ci-restore --network ci-pgnet \
+            -e POSTGRES_DB=gogo_restore -e POSTGRES_USER=restore_user -e POSTGRES_PASSWORD=restore_pass \
+            postgres:18-alpine
+          for i in $(seq 1 30); do
+            if docker exec ci-restore pg_isready -U restore_user -d gogo_restore > /dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          # 3. Restore the backup into the disposable database.
+          docker run --rm --network ci-pgnet -e PGPASSWORD=restore_pass -v "$PWD/backups:/backups" postgres:18-alpine \
+            pg_restore -h ci-restore -U restore_user -d gogo_restore --no-owner /backups/ci-backup.dump
+          # 4. Verify restored schema and row counts match the source.
+          COUNT_SQL="SELECT (SELECT COUNT(*) FROM users) || '/' || (SELECT COUNT(*) FROM registered_applications) || '/' || (SELECT COUNT(*) FROM notification_campaigns) || '/' || (SELECT COUNT(*) FROM schema_migrations);"
+          SRC=$(docker run --rm --network host -e PGPASSWORD=ci_test_password postgres:18-alpine \
+            psql -h 127.0.0.1 -U gogo_app_user -d gogo_central -t -A -c "$COUNT_SQL")
+          DST=$(docker exec -e PGPASSWORD=restore_pass ci-restore \
+            psql -U restore_user -d gogo_restore -t -A -c "$COUNT_SQL")
+          echo "Source counts (users/apps/campaigns/migrations): $SRC"
+          echo "Restored counts: $DST"
+          if [ "$SRC" != "$DST" ]; then
+            echo "FAIL: restored row counts do not match source database"
+            exit 1
+          fi
+          IDX=$(docker exec -e PGPASSWORD=restore_pass ci-restore \
+            psql -U restore_user -d gogo_restore -t -A -c \
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'notification_campaigns' AND indexname = 'idx_campaigns_worker_queue'")
+          if [ -z "$IDX" ]; then
+            echo "FAIL: worker queue index missing after restore"
+            exit 1
+          fi
+          echo "Restored index verified: $IDX"
+          # 5. Never commit backups: verify .gitignore covers the directory.
+          grep -qE '^/?backups/?$|^backups' .gitignore || echo "backups/" >> .gitignore
+          rm -rf backups/ci-backup.dump
+          docker rm -f ci-restore > /dev/null
+          docker network rm ci-pgnet > /dev/null
+          echo "Backup/restore verification PASSED."
 
       # Diagnostic: on any step failure, post captured logs as a PR comment so
       # failures are readable from clients without Actions log access.
@@ -70,7 +138,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'build', 'docker'];
+            const logs = ['install', 'eslint', 'tsc', 'schema', 'test', 'testpg', 'build', 'docker'];
             let body = 'CI failed. Captured step output:\n';
             for (const name of logs) {
               try {
@@ -88,3 +156,212 @@ jobs:
               issue_number: context.issue.number,
               body,
             });
+
+  # ---------------------------------------------------------------------------
+  # Objective: verify the RUNTIME, not just the image build. Starts the real
+  # docker-compose stack (postgres 18 + gogo-backend), probes the live health
+  # endpoints, restarts PostgreSQL and proves the app recovers without dying,
+  # then verifies graceful SIGTERM shutdown with a clean exit code.
+  # ---------------------------------------------------------------------------
+  docker-compose-runtime:
+    name: Docker Compose Runtime (live probes, PG restart, graceful stop)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose config --quiet
+
+      - name: Build & start full stack (postgres + gogo-backend)
+        run: docker compose up --build -d
+
+      - name: Wait for application readiness (/api/v1/health/ready = 200)
+        run: |
+          for i in $(seq 1 120); do
+            if curl -sf --max-time 10 http://localhost:3000/api/v1/health/ready > /dev/null 2>&1; then
+              echo "Application ready after attempt $i."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "FAIL: application never reported ready."
+          docker compose logs --tail 120
+          exit 1
+
+      - name: Verify liveness & readiness endpoints + runtime Node version
+        run: |
+          set -euo pipefail
+          NODE_IN_IMAGE=$(docker exec gogo-central-backend node --version)
+          echo "node in app image: $NODE_IN_IMAGE"
+          docker exec gogo-central-backend node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<24||(maj===24&&min<12)) { console.error('FAIL: runtime Node below @firebase/* engines >=24.12.0'); process.exit(1); } console.log('OK: runtime image Node satisfies engines >=24.12.0');"
+          LIVE=$(curl -sf http://localhost:3000/api/v1/health/live)
+          echo "health/live: $LIVE"
+          echo "$LIVE" | grep -q '"status":"ok"'
+          READY=$(curl -sf http://localhost:3000/api/v1/health/ready)
+          echo "health/ready: $READY"
+          echo "$READY" | grep -q '"database":"connected"'
+
+      - name: "Database outage: readiness reports 503, liveness stays 200"
+        run: |
+          set -euo pipefail
+          echo "Stopping postgres to create a deterministic outage (restart recovers too fast to observe)."
+          docker compose stop postgres
+          # Readiness must honestly report 503 while the database is down.
+          SAW_OUTAGE=0
+          for i in $(seq 1 30); do
+            READY_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 http://localhost:3000/api/v1/health/ready || true)
+            LIVE_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://localhost:3000/api/v1/health/live || true)
+            echo "during outage: ready=$READY_CODE live=$LIVE_CODE (attempt $i)"
+            if [ "$LIVE_CODE" != "200" ]; then
+              echo "FAIL: liveness died during the database outage."
+              docker logs --tail 60 gogo-central-backend
+              exit 1
+            fi
+            if [ "$READY_CODE" = "503" ]; then SAW_OUTAGE=1; break; fi
+            sleep 1
+          done
+          if [ "$SAW_OUTAGE" != "1" ]; then
+            echo "FAIL: readiness never reported 503 while postgres was fully stopped."
+            docker logs --tail 60 gogo-central-backend
+            exit 1
+          fi
+          echo "Verified: readiness reported 503 during the outage while liveness stayed 200."
+
+      - name: "PostgreSQL recovery: readiness returns 200 and a real query works"
+        run: |
+          set -euo pipefail
+          docker compose start postgres
+          # Recovery: readiness must return to 200 after PG is healthy again.
+          for i in $(seq 1 40); do
+            if curl -sf --max-time 20 http://localhost:3000/api/v1/health/ready > /dev/null 2>&1; then
+              echo "Application recovered after PostgreSQL outage (attempt $i)."
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "FAIL: application did not recover after the PostgreSQL outage."
+          docker compose logs --tail 120
+          exit 1
+
+      - name: "Post-recovery database operation via the application pool"
+        run: |
+          set -euo pipefail
+          docker exec gogo-central-backend node --import tsx -e "(async () => { const { getPool, closePool } = await import('/app/src/db/pool.ts'); const r = await getPool().query('SELECT COUNT(*)::int AS applied FROM schema_migrations'); console.log('DB operation OK: schema_migrations applied =', r.rows[0].applied); await closePool(); })()"
+
+      - name: "Graceful shutdown: SIGTERM drains and exits 0"
+        run: |
+          set -euo pipefail
+          docker compose stop gogo-backend
+          EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' gogo-central-backend)
+          echo "container exit code after SIGTERM: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "FAIL: container did not exit cleanly."
+            docker logs --tail 60 gogo-central-backend
+            exit 1
+          fi
+          if ! docker logs gogo-central-backend 2>&1 | grep -q "Draining HTTP connections gracefully"; then
+            echo "FAIL: graceful drain log line missing."
+            docker logs --tail 60 gogo-central-backend
+            exit 1
+          fi
+          echo "Graceful shutdown verified: SIGTERM -> drain -> exit 0."
+
+      # Diagnostic: this job's step logs are not otherwise readable for private
+      # repositories from mobile clients, so on failure capture the live state
+      # of the stack and post it as a PR comment before teardown destroys it.
+      - name: Report runtime diagnostics to pull request
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const run = (cmd) => {
+              try {
+                return execSync(cmd, { encoding: 'utf8' }).toString();
+              } catch (e) {
+                return String(e.stdout || '') + String(e.stderr || '');
+              }
+            };
+            let body = 'Docker Compose runtime job failed. Live diagnostics:\n';
+            const sections = [
+              ['compose ps', 'docker compose ps -a'],
+              ['app state', 'docker inspect -f "status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} started={{.State.StartedAt}}" gogo-central-backend 2>&1'],
+              ['app last logs', 'docker logs --tail 100 gogo-central-backend 2>&1'],
+              ['postgres last logs', 'docker logs --tail 40 gogo-local-postgres 2>&1'],
+              ['compose config errors', 'docker compose config --quiet 2>&1 || true'],
+            ];
+            for (const [name, cmd] of sections) {
+              const out = run(cmd).trim().slice(-2500) || '(no output)';
+              body += '\n<details><summary>' + name + '</summary>\n\n```\n' + out + '\n```\n</details>\n';
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Teardown (disposable volumes)
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  # ---------------------------------------------------------------------------
+  # Objective: npm reproducibility. Generates package-lock.json with the same
+  # Node/npm toolchain CI uses, validates a clean `npm ci` install from it,
+  # then commits the lockfile back to the branch (plain commit, no force-push)
+  # so CI and Docker can switch to `npm ci` from a verified lockfile.
+  # ---------------------------------------------------------------------------
+  npm-lockfile:
+    name: Generate & Verify package-lock.json (npm ci reproducibility)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout branch head (never the pull_request merge ref)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+
+      - name: Setup Node.js 24 (LTS; matches @firebase/* engines >=24.12.0)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Print toolchain versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Generate package-lock.json (npm install --package-lock-only)
+        run: npm install --package-lock-only --no-audit --no-fund
+
+      - name: Verify clean reproducible install (npm ci)
+        run: npm ci --no-audit --no-fund
+
+      - name: Upload lockfile artifact (fallback for restricted tokens)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-lock-json
+          path: package-lock.json
+          if-no-files-found: error
+
+      - name: Commit lockfile to the branch (plain commit, no force-push)
+        if: github.event_name == 'pull_request'
+        run: |
+          git config user.name "gogo-ci[bot]"
+          git config user.email "actions@github.com"
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "package-lock.json is already up to date; nothing to commit."
+          else
+            git commit -m "chore: generate package-lock.json for reproducible npm ci (Node $(node --version), npm $(npm --version))"
+            git push origin HEAD:${{ github.head_ref }}
+          fi

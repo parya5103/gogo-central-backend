@@ -27,7 +27,7 @@
 - **Total Monthly Cost**: **₹0 / month**.
 
 ### Scenario B: ₹0 Cloud Production Stack (Cloud Run Scale-to-Zero + Neon Free Tier PostgreSQL)
-> **Honest status**: this scenario's costs are accurate, but the runtime is not production-ready yet — the Express server currently holds all state in memory, so PostgreSQL (Neon) is not yet read/written by the backend and restarts lose data. Do not onboard live traffic until the persistence milestone lands (`ARCHITECTURE.md` §2a).
+> **Status update (v2.0.0)**: the backend runtime now actually reads/writes PostgreSQL through the repository layer, so Neon (or any configured PostgreSQL provider) is genuinely used at runtime with durable persistence across restarts. Costs remain ₹0 on the Neon Free Tier. Remaining caveats before live traffic: Firebase credentials must be configured, and Cloud Run deployment itself is documented but not yet provisioned (₹0 mandate — nothing was deployed or billed automatically).
 - **Google Cloud Run (`--min-instances=0`, < 2M req/mo)**: `₹0`
 - **Neon Serverless PostgreSQL (`PG_PROVIDER=neon`, 0.5 GB, scale-to-zero)**: `₹0`
 - **Firebase Auth (< 50k MAUs) + FCM (Unlimited)**: `₹0`
