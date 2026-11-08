@@ -1,5 +1,35 @@
 # GoGo Central Backend — Implementation Changelog (`CHANGELOG.md`)
 
+## [2.0.0] — 2026-11-08 (PostgreSQL Runtime Integration & Production Hardening)
+
+### Runtime Persistence (the headline change)
+- **Real PostgreSQL data-access layer**: `src/db/pool.ts` (lazy `pg.Pool` singleton from `SQL_*` env: connection/query timeouts, graceful drain, `withTransaction()` with auto-rollback, `checkDatabaseHealth()`, sanitized `DatabaseUnavailableError` — never credentials), `src/db/migrate.ts` (`schema_migrations` tracking with sha256 checksums under `pg_advisory_lock`; safely repeatable), and nine repositories under `src/repositories/` (users, apps, devices, preferences, campaigns, deliveries, audit, security, config). All production API operations (users, apps, roles, device tokens, preferences, campaigns, delivery receipts, audit logs, security events, system configs) now read/write PostgreSQL; no production dependence on in-memory Maps.
+- **Store architecture**: `GoGoDataStore` interface + `resolveDataStore()` — `PostgresDataStore` is the default; the legacy engine survives only behind explicit `InMemoryDataStore` (`GOGO_TEST_IMPORT`/`GOGO_IN_MEMORY_DEMO`). If PostgreSQL is unreachable at startup the service exits with a sanitized error instead of silently serving from memory.
+- **Migration `002_postgres_runtime.sql`** (repeatable, non-destructive): `users.email_masked/email_verified/auth_provider/time_zone` (validated IANA), campaign `payload_hash`/`processing_locked_at`/`locked_by`/`next_retry_at` + worker indexes, delivery `skip_reason`/`retry_count`/`next_attempt_at` + extended status CHECK (`skipped_quiet_hours`, `failed_permanent`), delivery FKs (campaigns/devices/users/apps) with `UNIQUE (notification_id, device_id)` idempotent receipts, and the `rate_limit_buckets` table.
+
+### Distributed Idempotency & Durable Worker
+- **Database-backed idempotency**: atomic `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING` reservation; concurrent duplicates can never create two campaigns (`PGT-09` proves exactly-one-winner across 6 racing inserts). Same key + different payload → `HTTP 409 IDEMPOTENCY_PAYLOAD_MISMATCH` (sha256 canonical payload hash). Durable across restarts and replicas; retention prunes only terminal campaigns.
+- **Notification worker** (`src/server/notification-worker.ts`): `FOR UPDATE SKIP LOCKED` campaign claiming (disjoint across instances — `PGT-10`), 5-minute stale-claim reclamation for interrupted processing (`PGT-11`), bounded exponential backoff with jitter, transient-only retries with per-delivery `retry_count` and `failed_permanent` at the cap (`PGT-12`), expired-token pruning with security events, and honest `sent/failed/skipped` counts derived strictly from delivery receipts. Honest at-least-once processing (no exactly-once FCM claims).
+
+### Preferences, Quiet Hours & Timezones
+- Server-side preference enforcement before dispatch (enabled/per-platform/marketing/transactional gates) with `skipped_preference` receipts; marketing broadcasts additionally respect per-user quiet hours evaluated in the user's own validated IANA timezone (overnight windows and DST safe; users without a timezone are never assumed UTC). `PGT-13`/`PGT-14`/`PGT-15`.
+
+### Hardening
+- **Distributed rate limiting**: `PostgresRateLimitStore` shares express-rate-limit counters across instances via atomic UPSERT (`PGT-18`).
+- **Health probes split**: `GET /api/v1/health/live` (process-only; survives brief DB outages) and `GET /api/v1/health/ready` (verifies real PostgreSQL connectivity, `503` when down); Docker/Docker-Compose healthchecks moved to readiness.
+- **`db:migrate` now actually migrates** (runs `runMigrations()` against the configured database instead of only verifying the SQL file); `db:backup` output states clearly that the SQL export covers in-memory demo state only and PostgreSQL backups must use `pg_dump` (`scripts/backup-restore.sh`), and `POST /api/v1/db/backup` in PG mode returns `409 BACKUP_USES_PG_DUMP`.
+- **CI**: added the PostgreSQL 18 service to all steps plus a real integration suite (`npm run test:pg`, tests `PGT-01`..`PGT-19` covering migrations, persistence, FK integrity, SQL-injection parameterization, idempotency races, worker concurrency, recovery, retry limits, quiet hours/timezones, and the rate-limit store) and a **disposable-database backup/restore verification** (pg_dump custom format → pg_restore into a throwaway container → row-count and index comparison; never production data).
+- `pg` added to dependencies; `@types/pg` to devDependencies; version bumped to 2.0.0.
+
+### Disclosed Limitations (v2.0.0)
+- Firebase live verification (real ID tokens, revoked-token flow against production Firebase) and live FCM delivery remain BLOCKED: CI runs without Firebase credentials; real-token sends fail honestly (`failed_transient`/transport error) rather than fabricating success. `FCM_DRY_RUN=true` default for local development.
+- Docker runtime (container start, signal handling, readiness probe in a live container) is built in CI but not executed as a running service in CI; marked NOT EXECUTED.
+- Cloud Run deployment is documented but intentionally not provisioned (₹0 mandate; no paid services enabled automatically).
+- `tsconfig.json` strict mode still disabled; `bun.lock` stale (no lockfile: `npm install` is the supported path).
+- `App.tsx` dashboard sandbox-header dev fallback retained (backend gate is the security boundary; unreachable by default).
+
+---
+
 ## [1.3.0] — 2026-11-08 (Independent Master Audit: Security & Integrity Remediations)
 
 ### Security Fixes

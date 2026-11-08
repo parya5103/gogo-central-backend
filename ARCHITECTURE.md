@@ -21,7 +21,7 @@
 │ PostgreSQL 18 DB  │ │         Firebase Cloud Messaging (FCM v1 API)        │
 │ (Provider-Indep.) │ │  • Web Push VAPID Multicast                          │
 │ • Local Docker 18 │ │  • Android Notification + Data Payloads              │
-│ • Android Termux  │ │  • Synchronous Idempotency Mutex + 3x Backoff Retry  │
+│ • Android Termux  │ │  • Durable PG Idempotency + Bounded Backoff Retry   │
 │ • Cloud SQL / Neon│ └──────────────────────────────────────────────────────┘
 └───────────────────┘
 ```
@@ -32,16 +32,26 @@
 
 PostgreSQL is never replaced by Firestore. All 10 backend domain tables are defined in `migrations/001_initial_schema.sql` with foreign keys, composite indexes, and `CHECK` constraints:
 
-### 2a. Current Persistence Reality (Honest Status)
+### 2a. Runtime Persistence (Real PostgreSQL Runtime — v2.0.0)
 
-The runtime today stores all state in in-memory Maps inside `src/server/store.ts` (users, devices, preferences, campaigns, delivery receipts, audit logs, security events, system configs). No PostgreSQL client is imported anywhere in the runtime; `PG_*` connection variables are consumed only by `src/db/postgres-config.ts` configuration resolution and the migration/backup scripts. Consequences:
+Since v2.0.0 the runtime is PostgreSQL-backed by default. All production state (users, apps, roles, devices, preferences, campaigns, delivery receipts, audit logs, security events, system configs, rate-limit buckets) is served from PostgreSQL through a real `pg` data-access layer. The in-memory Maps engine survives only as an explicit, clearly-labelled demo/test adapter.
 
-- All state is lost on process/container restart.
-- Idempotency protection is in-memory per-process; a restart clears idempotency keys, and two app replicas would not share the mutex.
-- Audit logs and security events are capped in memory (5,000 audit logs / 2,000 security events, oldest dropped) to prevent unbounded growth.
-- The PostgreSQL 18 schema below is fully designed and migration-ready (see section 4), but wiring it into the Express runtime requires adding a `pg` dependency and repository layer. This is the single largest remaining engineering task and is intentionally not half-implemented: cross-process idempotency (`notification_campaigns.idempotency_key UNIQUE`), durable receipts, and restart-safe state all depend on it.
+**Layer structure:**
 
-The schema as designed:
+- `src/db/pool.ts`: lazy singleton `pg.Pool` built from `SQL_*` env via `resolvePostgresConfig()`; statement/query timeouts, idle handling, graceful `closePool()`, `checkDatabaseHealth()`, parameterized `query()` helper, `withTransaction()` (auto-rollback), `DatabaseUnavailableError` sanitization (no credentials in errors/logs).
+- `src/db/migrate.ts`: `runMigrations()` applies `migrations/*.sql` in order inside a `pg_advisory_lock`; every applied file is recorded in `schema_migrations` with a sha256 checksum. Re-runs are safe (skips applied files) and loud (checksum mismatch on an edited applied migration aborts startup).
+- `src/repositories/*.repository.ts`: `users`, `apps`, `devices`, `preferences`, `campaigns`, `deliveries`, `audit`, `security`, `config`. All SQL is parameterized; no string interpolation of user input.
+- `src/server/data-store.ts`: `GoGoDataStore` interface + `resolveDataStore()`:
+  - `GOGO_TEST_IMPORT=true` or `GOGO_IN_MEMORY_DEMO=true` → `InMemoryDataStore` (wraps the legacy engine; test/demo only).
+  - Otherwise → `PostgresDataStore`: runs migrations, starts the worker loop, and fails startup with a sanitized error if PostgreSQL is unreachable. **Production never silently falls back to memory.**
+- `src/server/notification-worker.ts`: durable worker. Due campaigns are claimed with `FOR UPDATE SKIP LOCKED` (safe across replicas), stale `processing` claims are reclaimed after 5 minutes (crash recovery), transient delivery failures retry with bounded exponential backoff + jitter, permanent failures are terminal, and retention pruning only deletes terminal campaigns.
+- `src/server/rate-limit-pg.ts`: `PostgresRateLimitStore` keeps express-rate-limit counters in the `rate_limit_buckets` table via a single atomic UPSERT per hit, so limits hold across Cloud Run replicas (the default MemoryStore is per-process and would multiply limits per instance).
+
+**Idempotency is durable:** `notification_campaigns.idempotency_key` has a UNIQUE constraint; `insertCampaignIfAbsent` uses atomic `INSERT ... ON CONFLICT DO NOTHING`, so concurrent or replayed requests can never create a duplicate campaign (a stored sha256 payload hash makes key reuse with a different payload a `409 IDEMPOTENCY_PAYLOAD_MISMATCH`). This is honest at-least-once processing, not claimed exactly-once FCM delivery (external FCM cannot guarantee that).
+
+**Quiet hours & timezones:** `users.time_zone` (validated IANA identifier) is set per user; quiet-hours evaluation runs in the user's own timezone with correct overnight-window and DST handling. Users without a timezone are never silently assumed to be in UTC (quiet hours are not enforced for them, documented).
+
+The 10-table schema above is live and enforced; migration `002_postgres_runtime.sql` adds the runtime columns (`users.email_masked/email_verified/auth_provider/time_zone`, campaign `payload_hash`/worker-lock/`next_retry_at`, delivery `skip_reason`/`retry_count`/`next_attempt_at`, extended delivery status CHECK, `rate_limit_buckets`), plus delivery FKs with `UNIQUE (notification_id, device_id)` idempotent receipts.
 
 1. **`users`**: `uid` (PK, Firebase Auth UID), `display_name`, `role` (`user` | `admin`), `is_active`, `created_at`, `updated_at`.
 2. **`registered_applications`**: `app_id` (PK), `name`, `domain`, `category` (`portal` | `civic` | `news` | `game`), `fcm_enabled`, `web_push_enabled`, `android_enabled`, `rate_limit_per_min`.
@@ -80,9 +90,11 @@ The schema as designed:
 
 ## 5. Runtime Dispatch, Scheduler & Environment Variables
 
-- FCM dispatch is receipt-honest: `sentCount`/`failedCount` derive strictly from per-device delivery receipts. Demo `fcm_*` tokens are simulated as delivered (marked with `simulated:` message IDs) so the stack runs without Firebase credentials; real tokens go through `adminMessaging.sendEachForMulticast` in 500-token chunks.
-- Scheduled campaigns (`scheduledFor` in the future) are dispatched by an in-process scheduler (`startScheduler`, 30s tick, singleton auto-start). On restart, still-pending scheduled campaigns are re-scanned from memory; once PostgreSQL wiring lands, scheduling must move to a durable queue.
+- FCM dispatch is receipt-honest: `sentCount`/`failedCount` derive strictly from per-device delivery receipts in PostgreSQL. Demo `fcm_*` tokens are simulated as delivered (marked with `simulated:` message IDs) so the stack runs without Firebase credentials; real tokens go through `adminMessaging.sendEachForMulticast` in 500-token chunks (`FCM_DRY_RUN` supported; missing credentials fail the real send honestly, never fabricating success).
+- Immediate campaigns are processed inline (preserving the HTTP 201 + counts contract); the durable worker loop is the safety net for interrupted processing. Scheduled campaigns (`scheduledFor` in the future) are dispatched by the PostgreSQL-backed worker when due, so scheduling survives restarts and replicas.
+- Health endpoints: `GET /api/v1/health/live` (process-only liveness; does not fail on a database outage), `GET /api/v1/health/ready` (readiness; returns 503 while PostgreSQL connectivity fails), and the original `GET /api/v1/health` for compatibility.
 - `GOGO_ENABLE_SANDBOX_AUTH` (default unset): opt-in for `X-GoGo-Sandbox-Role` header auth in non-production environments. Always rejected in production mode.
+- `GOGO_IN_MEMORY_DEMO=true`: explicit demo-mode escape hatch using the legacy in-memory engine (never for production).
 - `FCM_DRY_RUN` (default unset): when `true`, real-token FCM requests are sent in FCM dry-run mode (validated, not delivered). Requires Firebase credentials either way.
 - `CORS_ALLOWED_ORIGINS`: comma-separated extra origins merged into the hardcoded `gogocompany.in` allowlist. Unowned third-party domains are no longer allowed.
 - `NODE_ENV=production`: disables sandbox headers, the `/api/v1/tests/run` self-test endpoint, and the App.tsx dev dashboard fallback expectations.

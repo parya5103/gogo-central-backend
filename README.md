@@ -40,16 +40,29 @@ npm test
 | :--- | :--- | :--- |
 | `NODE_ENV` | unset (= development) | `production` disables sandbox headers, the self-test endpoint, and the dev dashboard fallback. `docker-compose.yml` sets it to `production`. |
 | `GOGO_ENABLE_SANDBOX_AUTH` | unset (= disabled) | Opt-in for `X-GoGo-Sandbox-Role: admin/user` header auth in non-production local/CI testing. Never enable in production or on any internet-reachable deployment. |
+| `GOGO_IN_MEMORY_DEMO` | unset (= PostgreSQL runtime) | When `true`, runs the legacy in-memory engine with demo seeds instead of PostgreSQL. Demo/offline use only — never production. The PostgreSQL runtime is the default. |
 | `FCM_DRY_RUN` | unset (= real sends) | When `true`, real-token FCM requests are validated by Firebase without delivering. Requires `GOOGLE_APPLICATION_CREDENTIALS` to point at a service-account key either way. |
 | `CORS_ALLOWED_ORIGINS` | unset | Comma-separated extra origins merged into the GoGo-owned allowlist (`gogocompany.in` and subdomains). |
-| `SQL_HOST`, `SQL_PORT`, `SQL_DB_NAME`, `SQL_USER`, `SQL_PASSWORD`, `PG_PROVIDER` | see `.env.example` | PostgreSQL connection settings consumed by migration/backup scripts and `src/db/postgres-config.ts` (runtime persistence wiring is pending, see `ARCHITECTURE.md` §2a). |
+| `SQL_HOST`, `SQL_PORT`, `SQL_DB_NAME`, `SQL_USER`, `SQL_PASSWORD`, `PG_PROVIDER` | see `.env.example` | PostgreSQL connection settings consumed by the runtime pool (`src/db/pool.ts`), the migration runner, and backup/restore scripts. If the database is unreachable at startup in PostgreSQL mode, the server exits with a sanitized error (never a silent in-memory fallback). |
+| `PG_STATEMENT_TIMEOUT_MS`, `PG_QUERY_TIMEOUT_MS` | `15000` | Per-statement/query guard rails (milliseconds) against hostile or stalled queries. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Firebase service-account JSON used by `firebase-admin` for Auth verification and FCM. Without it, the server runs with demo `fcm_*` token simulation and Firebase token verification fails closed (401). |
 
 ---
 
-## 1b. Persistence Status (Read Before Production Use)
+## 1b. Persistence Status (v2.0.0)
 
-The Express runtime currently keeps all state in memory (see `ARCHITECTURE.md` §2a). Data is lost on restart, and idempotency is per-process. The PostgreSQL 18 schema, migrations, backups, and provider config are fully designed and testable, but the runtime does not yet read/write PostgreSQL. Do not point live website traffic at this backend until the persistence milestone lands.
+The Express runtime is now PostgreSQL-backed by default: all users, apps, roles, device tokens, preferences, campaigns, delivery receipts, audit logs, security events, and system configs are served through the repository layer over a real `pg` pool. Migrations are tracked in `schema_migrations` and applied automatically at startup (`npm run db:migrate` does the same on demand). Idempotency is durable (database UNIQUE constraint), and scheduled campaign dispatch is a restart-safe worker loop. The in-memory engine remains only as an explicit demo mode (`GOGO_IN_MEMORY_DEMO=true`). Verification: the CI PostgreSQL 18 service runs the integration suite `npm run test:pg` (PGT-01..PGT-19) on every push/PR.
+
+### Run the PostgreSQL integration tests locally
+
+```bash
+# Requires a disposable PostgreSQL 18 instance (docker compose up -d postgres)
+export SQL_HOST=127.0.0.1 SQL_PORT=5432 SQL_DB_NAME=gogo_central \
+       SQL_USER=gogo_app_user SQL_PASSWORD=local_dev_only_password_change_in_prod
+npm run test:pg
+```
+
+Never point `SQL_*` (or the tests) at production: the tests write synthetic rows.
 
 ---
 
@@ -81,12 +94,13 @@ git clone https://github.com/parya5103/gogo-central-backend.git
 cd gogo-central-backend
 npm install
 
-# Step 5: Apply the 10-table PostgreSQL schema migration
-psql -U gogo_app_user -d gogo_central -f migrations/001_initial_schema.sql
+# Step 5: Apply the tracked migrations (001 + 002, safely repeatable, checksummed)
+npm run db:migrate
 
-# Step 6: Verify schema, run security tests, and start the server on port 3000
+# Step 6: Verify schema, run security + PostgreSQL integration tests, start the server
 npm run db:verify
 npm test
+npm run test:pg
 npm run dev
 ```
 Open `http://127.0.0.1:3000` in your Android browser (Chrome / Brave / Firefox) to use the full Admin Control Plane locally!
@@ -101,15 +115,18 @@ The repository provides both a cross-platform Node.js CLI (`scripts/db-manager.t
 # 1. Verify all 10 PostgreSQL tables, indexes, and foreign keys + active PG_PROVIDER
 npm run db:verify
 
-# 2. Generate a transactional SQL backup dump (backups/gogo_central_latest.sql)
-npm run db:backup
+# 2. Apply all pending migrations (schema_migrations-tracked, checksummed, repeatable)
+npm run db:migrate
 
-# 3. Validate the transactional SQL backup dump (prints the psql restore command; does not execute SQL)
-npm run db:restore
-
-# 4. Native pg_dump / psql compressed backup & single-transaction restore (when pg_dump is installed)
+# 3. Authoritative PostgreSQL backup (pg_dump custom format) & disposable-database restore
 bash ./scripts/backup-restore.sh backup
 bash ./scripts/backup-restore.sh restore ./backups/gogo_central_<TIMESTAMP>.sql.gz
+# CI additionally proves the round trip: pg_dump -> pg_restore into a throwaway
+# container -> row-count/index comparison (never against production).
+
+# 4. Demo-mode SQL export (in-memory engine state ONLY — not a PostgreSQL backup)
+npm run db:backup
+npm run db:restore
 ```
 
 ---
