@@ -8,6 +8,10 @@
  */
 
 process.env.GOGO_TEST_IMPORT = 'true';
+// Sandbox-header auth is disabled by default (secure default). The regression
+// suite opts in for local/CI testing: REG-01/REG-03 verify it is still blocked
+// in production mode, and REG-11 verifies it is blocked without this opt-in.
+process.env.GOGO_ENABLE_SANDBOX_AUTH = 'true';
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -310,6 +314,150 @@ async function runStandaloneSecurityAudit() {
         name: 'Container Secret Hygiene (.dockerignore), 10 SQL Tables & 12 Firestore Rules',
         passed: true,
         detail: 'Verified .dockerignore, 10 PostgreSQL tables, and 12/12 Dirty Dozen Firestore rules.',
+      });
+    }
+
+    // 11. [CRITICAL] Sandbox Role Header Must Be Rejected Without GOGO_ENABLE_SANDBOX_AUTH Opt-In
+    {
+      const savedFlag = process.env.GOGO_ENABLE_SANDBOX_AUTH;
+      delete process.env.GOGO_ENABLE_SANDBOX_AUTH;
+      try {
+        const res = await fetch(`${baseUrl}/api/v1/overview`, {
+          headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+        });
+        const body = (await res.json()) as { code?: string };
+        assert.equal(res.status, 401, 'Sandbox header must be rejected without opt-in env');
+        assert.equal(body.code, 'AUTH_SANDBOX_DISABLED');
+      } finally {
+        if (savedFlag !== undefined) process.env.GOGO_ENABLE_SANDBOX_AUTH = savedFlag;
+      }
+      results.push({
+        id: 'REG-11',
+        severity: 'CRITICAL',
+        name: 'Sandbox Header Auth Disabled by Default (GOGO_ENABLE_SANDBOX_AUTH opt-in required)',
+        passed: true,
+        detail: 'Without GOGO_ENABLE_SANDBOX_AUTH=true, X-GoGo-Sandbox-Role returns 401 AUTH_SANDBOX_DISABLED.',
+      });
+    }
+
+    // 12. [HIGH] Admin-Only Audit Log & Security Event Read Endpoints Enforce RBAC
+    {
+      const resAdmin = await fetch(`${baseUrl}/api/v1/audit-logs?limit=10`, {
+        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+      });
+      assert.equal(resAdmin.status, 200);
+      const adminBody = (await resAdmin.json()) as { auditLogs: unknown[]; count: number };
+      assert.ok(Array.isArray(adminBody.auditLogs));
+      assert.ok(typeof adminBody.count === 'number');
+
+      const resAdminSec = await fetch(`${baseUrl}/api/v1/security-events?limit=10`, {
+        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+      });
+      assert.equal(resAdminSec.status, 200);
+      const secBody = (await resAdminSec.json()) as { securityEvents: unknown[] };
+      assert.ok(Array.isArray(secBody.securityEvents));
+
+      const resUser = await fetch(`${baseUrl}/api/v1/audit-logs`, {
+        headers: { 'X-GoGo-Sandbox-Role': 'user' },
+      });
+      assert.equal(resUser.status, 403);
+
+      results.push({
+        id: 'REG-12',
+        severity: 'HIGH',
+        name: 'Admin-Only GET /api/v1/audit-logs & /api/v1/security-events RBAC',
+        passed: true,
+        detail: 'Admin reads bounded audit/security event lists (200); standard user is blocked (403).',
+      });
+    }
+
+    // 13. [HIGH] Admin-Only System Configuration Read Endpoint Enforces RBAC
+    {
+      const resAdmin = await fetch(`${baseUrl}/api/v1/system-config`, {
+        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+      });
+      assert.equal(resAdmin.status, 200);
+      const adminBody = (await resAdmin.json()) as { systemConfigs: unknown[]; count: number };
+      assert.ok(Array.isArray(adminBody.systemConfigs));
+
+      const resUser = await fetch(`${baseUrl}/api/v1/system-config`, {
+        headers: { 'X-GoGo-Sandbox-Role': 'user' },
+      });
+      assert.equal(resUser.status, 403);
+
+      results.push({
+        id: 'REG-13',
+        severity: 'HIGH',
+        name: 'Admin-Only GET /api/v1/system-config RBAC',
+        passed: true,
+        detail: 'Admin reads system configuration (200); standard user is blocked (403).',
+      });
+    }
+
+    // 14. [HIGH] Honest Receipt-Derived Delivery Counts (No Metric Inflation)
+    {
+      // Marketing broadcast to sarkari-sarthi: only active device belongs to
+      // uid_sarkari_aspirant_01 whose seeded prefs have marketingAlerts=false,
+      // so the preference gate must skip it and sentCount must be an honest 0.
+      const resBroadcast = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: {
+          'X-GoGo-Sandbox-Role': 'admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          idempotencyKey: `idem_honest_broadcast_${Date.now()}`,
+          appId: 'sarkari-sarthi',
+          targetType: 'product',
+          targetValue: 'all',
+          platform: 'all',
+          title: 'Sarkari Sarthi Update',
+          body: 'Marketing broadcast that seeded preferences must block.',
+          deepLink: 'https://gogocompany.in/sarkari-sarthi/',
+        }),
+      });
+      assert.equal(resBroadcast.status, 201, 'Fresh dispatch returns 201 Created');
+      const broadcastBody = (await resBroadcast.json()) as {
+        campaign: { sentCount: number; failedCount: number };
+      };
+      assert.equal(
+        broadcastBody.campaign.sentCount,
+        0,
+        'Marketing broadcast to opted-out user must report honest sentCount=0'
+      );
+
+      // Transactional individual notification to the same user: seeded prefs
+      // have transactionalAlerts=true, so the single demo device is delivered.
+      const resIndividual = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: {
+          'X-GoGo-Sandbox-Role': 'admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          idempotencyKey: `idem_honest_individual_${Date.now()}`,
+          appId: 'sarkari-sarthi',
+          targetType: 'individual',
+          targetValue: 'uid_sarkari_aspirant_01',
+          platform: 'all',
+          title: 'Your Application Status',
+          body: 'Transactional notification honoring user preferences.',
+          deepLink: 'https://gogocompany.in/sarkari-sarthi/',
+        }),
+      });
+      assert.equal(resIndividual.status, 201, 'Fresh dispatch returns 201 Created');
+      const individualBody = (await resIndividual.json()) as {
+        campaign: { sentCount: number; failedCount: number };
+      };
+      assert.equal(individualBody.campaign.sentCount, 1);
+      assert.equal(individualBody.campaign.failedCount, 0);
+
+      results.push({
+        id: 'REG-14',
+        severity: 'HIGH',
+        name: 'Honest FCM Delivery Metrics Derived From Receipts',
+        passed: true,
+        detail: 'Marketing broadcast to opted-out user reports sentCount=0 (skipped_preference); transactional individual send reports sentCount=1.',
       });
     }
 
