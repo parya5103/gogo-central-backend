@@ -26,7 +26,7 @@ import {
   Copy,
   Check,
 } from 'lucide-react';
-import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
+import { signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db, googleAuthProvider, handleFirestoreError, OperationType } from './lib/firebase.ts';
 import type {
@@ -295,9 +295,26 @@ export default function App() {
     };
   }, [activeSection, selectedDocId, getAuthHeaders]);
 
+  // Google sign-in uses a full-page redirect flow because mobile browsers
+  // (notably Android Chrome) break popup-based OAuth with
+  // auth/popup-closed-by-user. Once the browser returns from
+  // accounts.google.com, getRedirectResult() surfaces any failure; a
+  // successful sign-in fires onAuthStateChanged.
+  useEffect(() => {
+    getRedirectResult(auth).catch((error) => {
+      setBannerMessage({
+        type: 'error',
+        text:
+          error instanceof Error
+            ? `Sign-in failed: ${error.message}`
+            : 'Firebase Google Sign-In could not complete.',
+      });
+    });
+  }, []);
+
   const handleGoogleSignIn = async () => {
     try {
-      await signInWithPopup(auth, googleAuthProvider);
+      await signInWithRedirect(auth, googleAuthProvider);
       setBannerMessage({
         type: 'success',
         text: 'Authenticated with Firebase Authentication and verified ID token on backend.',
@@ -2461,3 +2478,4 @@ export default function App() {
     </div>
   );
 }
+
