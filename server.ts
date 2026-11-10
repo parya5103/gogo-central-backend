@@ -375,6 +375,51 @@ const SendNotificationSchema = z
   })
   .strict();
 
+// Upstream origin for the transparent Firebase auth handler proxy (mounted in
+// createGoGoApp as step 2b). Override with FIREBASE_AUTH_PROXY_ORIGIN when the
+// Firebase project changes.
+const FIREBASE_AUTH_PROXY_ORIGIN =
+  process.env.FIREBASE_AUTH_PROXY_ORIGIN ||
+  'https://gen-lang-client-0566323659.firebaseapp.com';
+
+// Transparently forwards /__/auth/* and /__/firebase/init.json to the
+// firebaseapp.com origin so the whole redirect sign-in flow stays same-origin
+// (Option 3 in the Firebase redirect-best-practices guide). The forwarding
+// must never be a 302 redirect.
+async function firebaseAuthProxyHandler(req: Request, res: Response) {
+  const upstreamUrl = `${FIREBASE_AUTH_PROXY_ORIGIN}${req.originalUrl}`;
+  const method = req.method.toUpperCase();
+  const hasBody = method !== 'GET' && method !== 'HEAD';
+  try {
+    const upstream = await fetch(upstreamUrl, {
+      method,
+      headers:
+        hasBody && typeof req.headers['content-type'] === 'string'
+          ? { 'content-type': req.headers['content-type'] }
+          : undefined,
+      body:
+        hasBody && Buffer.isBuffer(req.body) && req.body.length > 0
+          ? new Uint8Array(req.body)
+          : undefined,
+      redirect: 'manual',
+    });
+    res.status(upstream.status);
+    const contentType = upstream.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+    const cacheControl = upstream.headers.get('cache-control');
+    if (cacheControl) res.setHeader('Cache-Control', cacheControl);
+    const location = upstream.headers.get('location');
+    if (location) res.setHeader('Location', location);
+    res.end(Buffer.from(await upstream.arrayBuffer()));
+  } catch {
+    // Fail closed: sign-in helper responses must never be faked.
+    res.status(502).json({
+      error: 'Firebase auth handler proxy upstream unavailable.',
+      code: 'AUTH_PROXY_UPSTREAM_UNAVAILABLE',
+    });
+  }
+}
+
 export async function createGoGoApp() {
   // Resolve persistence BEFORE wiring middleware: the store is process-global
   // for the request handlers. Startup fails loudly here if PostgreSQL is
@@ -440,6 +485,15 @@ export async function createGoGoApp() {
       return callback(null, { origin: allowed, credentials: true });
     })
   );
+
+  // 2b. Firebase Auth Same-Origin Handler Proxy (storage-partitioning fix).
+  // Chrome M115+ / Safari 16.1+ / Firefox 109+ partition third-party storage,
+  // so the cross-origin iframe relay to <project>.firebaseapp.com loses the
+  // signInWithRedirect state ("missing initial state"). The dashboard client
+  // overrides authDomain to this app's own hostname (src/lib/firebase.ts);
+  // this proxy transparently serves the auth helper files from this origin.
+  app.all('/__/auth/*', express.raw({ type: '*/*', limit: '64kb' }), firebaseAuthProxyHandler);
+  app.get('/__/firebase/init.json', firebaseAuthProxyHandler);
 
   app.use(express.json({ limit: '50kb' }));
 

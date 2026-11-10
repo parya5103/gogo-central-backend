@@ -8,7 +8,15 @@ import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
+// The Auth handler is served from this app's own origin: server.ts proxies
+// /__/auth/* and /__/firebase/init.json to <project>.firebaseapp.com.
+// Browsers with third-party storage partitioning (Chrome M115+) otherwise
+// break signInWithRedirect with "missing initial state". See:
+// https://firebase.google.com/docs/auth/web/redirect-best-practices
+const authDomain =
+  typeof window !== 'undefined' ? window.location.hostname : firebaseConfig.authDomain;
+
+const app = initializeApp({ ...firebaseConfig, authDomain });
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleAuthProvider = new GoogleAuthProvider();
