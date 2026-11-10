@@ -176,6 +176,22 @@ export default function App() {
     return headers;
   }, [idToken, sandboxRole]);
 
+  // Action API calls need either a Firebase ID token or a localhost sandbox
+  // session. On the production origin an unsigned click would otherwise fire
+  // a credential-less request and surface a confusing 401 ("Missing
+  // Authorization Bearer Firebase ID Token"). Fail fast with a clear message
+  // instead. (fetchOverview and the doc viewer already gate themselves.)
+  const ensureApiAccess = useCallback((): boolean => {
+    if (idToken) return true;
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+    if (host === 'localhost' || host === '127.0.0.1') return true;
+    setBannerMessage({
+      type: 'error',
+      text: 'Sign in with Google first: admin actions need a Firebase ID token.',
+    });
+    return false;
+  }, [idToken]);
+
   // Listen to Firebase Auth state
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -210,8 +226,17 @@ export default function App() {
               }
             }
           }
-        } catch {
+        } catch (err) {
+          // Token fetch failed (e.g. network hiccup or revoked session).
+          // Never fail silently: the user would look signed in while every
+          // admin action 401s with a confusing "Missing Authorization" error.
           setIdToken(null);
+          setBannerMessage({
+            type: 'error',
+            text: `Signed in, but the Firebase ID token could not be fetched. Reload the page or sign in again. (${
+              err instanceof Error ? err.message.slice(0, 140) : 'unknown error'
+            })`,
+          });
         }
       } else {
         setIdToken(null);
@@ -362,6 +387,7 @@ export default function App() {
   };
 
   const handleRunAutomatedTests = async () => {
+    if (!ensureApiAccess()) return;
     setRunningTests(true);
     try {
       const res = await fetch('/api/v1/tests/run', {
@@ -388,6 +414,7 @@ export default function App() {
   };
 
   const handleSendNotification = async (reuseExistingIdempotencyKey = false) => {
+    if (!ensureApiAccess()) return;
     setSendingNotification(true);
     try {
       const keyToUse = reuseExistingIdempotencyKey
@@ -445,6 +472,7 @@ export default function App() {
   };
 
   const handleRetryCampaign = async (notificationId: string) => {
+    if (!ensureApiAccess()) return;
     try {
       const res = await fetch(`/api/v1/notifications/${notificationId}/retry`, {
         method: 'POST',
@@ -470,6 +498,7 @@ export default function App() {
     field: 'fcmEnabled' | 'webPushEnabled' | 'androidEnabled',
     value: boolean
   ) => {
+    if (!ensureApiAccess()) return;
     try {
       const res = await fetch(`/api/v1/apps/${appId}`, {
         method: 'PATCH',
@@ -493,6 +522,7 @@ export default function App() {
 
   const handleRegisterNewProduct = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!ensureApiAccess()) return;
     try {
       const res = await fetch('/api/v1/apps', {
         method: 'POST',
@@ -527,6 +557,7 @@ export default function App() {
 
   const handleRegisterDevice = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!ensureApiAccess()) return;
     try {
       const res = await fetch('/api/v1/devices/register', {
         method: 'POST',
@@ -557,6 +588,7 @@ export default function App() {
   };
 
   const handleRevokeDevice = async (deviceId: string) => {
+    if (!ensureApiAccess()) return;
     try {
       const res = await fetch(`/api/v1/devices/${deviceId}`, {
         method: 'DELETE',
@@ -581,6 +613,7 @@ export default function App() {
     pref: NotificationPreferenceRecord,
     patch: Partial<NotificationPreferenceRecord>
   ) => {
+    if (!ensureApiAccess()) return;
     try {
       const updated = { ...pref, ...patch };
       const res = await fetch(`/api/v1/preferences/${pref.appId}`, {
@@ -938,6 +971,7 @@ export default function App() {
                   </button>
                   <button
                     onClick={async () => {
+                      if (!ensureApiAccess()) return;
                       try {
                         const res = await fetch('/api/v1/db/backup', {
                           method: 'POST',
