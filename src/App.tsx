@@ -156,14 +156,21 @@ export default function App() {
   const [docContent, setDocContent] = useState<string>('Loading file...');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // Helper to build authenticated headers
+  // Helper to build authenticated headers. The sandbox role header is only
+  // accepted by local development servers (GOGO_ENABLE_SANDBOX_AUTH=true);
+  // production rejects it with 401 "Sandbox authentication headers are
+  // disabled in production", so it must never leave localhost.
   const getAuthHeaders = useCallback((): Record<string, string> => {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
     if (idToken) {
       headers['Authorization'] = `Bearer ${idToken}`;
-    } else {
+    } else if (
+      typeof window !== 'undefined' &&
+      (window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1')
+    ) {
       headers['X-GoGo-Sandbox-Role'] = sandboxRole;
     }
     return headers;
@@ -235,6 +242,15 @@ export default function App() {
   }, [products, devices, preferences]);
 
   const fetchOverview = useCallback(async () => {
+    // Never call the API before the Firebase ID token is ready: the
+    // production backend rejects unauthenticated requests. This callback is
+    // recreated (and the effect below re-runs) once onAuthStateChanged
+    // provides the token.
+    if (!idToken) {
+      setCurrentUser(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const response = await fetch('/api/v1/overview', {
@@ -256,6 +272,8 @@ export default function App() {
       setSecurityEvents(data.securityEvents || []);
       setSystemConfigs(data.systemConfigs || []);
       setFcmDryRun(typeof data.fcmDryRun === 'boolean' ? data.fcmDryRun : null);
+      // A successful overview load supersedes any stale auth-race error banner.
+      setBannerMessage(null);
     } catch (error) {
       setBannerMessage({
         type: 'error',
@@ -264,7 +282,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [getAuthHeaders]);
+  }, [getAuthHeaders, idToken]);
 
   useEffect(() => {
     fetchOverview();
@@ -275,6 +293,10 @@ export default function App() {
     if (activeSection !== 'costs-docs') return;
     let cancelled = false;
     async function loadDoc() {
+      if (!idToken) {
+        setDocContent('Sign in to view documentation.');
+        return;
+      }
       try {
         const res = await fetch(`/api/v1/docs/${encodeURIComponent(selectedDocId)}`, {
           headers: getAuthHeaders(),
@@ -293,7 +315,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeSection, selectedDocId, getAuthHeaders]);
+  }, [activeSection, selectedDocId, idToken, getAuthHeaders]);
 
   // Google sign-in uses a full-page redirect flow because mobile browsers
   // (notably Android Chrome) break popup-based OAuth with
