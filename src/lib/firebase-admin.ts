@@ -19,6 +19,7 @@ import { getAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
 import type { MulticastMessage, BatchResponse } from 'firebase-admin/messaging';
+import fs from 'node:fs';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 if (!getApps().length) {
@@ -84,4 +85,65 @@ export async function sendFcmMulticast(
     return (await testOverrides.sendEachForMulticast(message, dryRun)) as BatchResponse;
   }
   return adminMessaging.sendEachForMulticast(message, dryRun);
+}
+
+/**
+ * Public, unauthenticated Firebase Admin runtime diagnostics.
+ *
+ * Purpose: while server-side token verification is misconfigured (missing
+ * service-account credentials, wrong project audience), the admin dashboard
+ * cannot authenticate, so the failure is invisible to its own health panel.
+ * This self-check answers "is the server able to verify ID tokens, and if
+ * not, exactly why" WITHOUT exposing any secret: only booleans, the public
+ * project identifiers (already present in the shipped client config), and
+ * the raw error CODE of a deliberately failing live probe.
+ */
+export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>> {
+  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
+
+  let credentialFileState = 'env-not-set';
+  let credentialProjectId: string | null = null;
+  if (credentialsPath) {
+    try {
+      const credJson = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+      credentialProjectId =
+        typeof credJson.project_id === 'string' ? credJson.project_id : null;
+      credentialFileState = credentialProjectId ? 'parsed' : 'parsed-no-project-id';
+    } catch {
+      try {
+        credentialFileState = fs.existsSync(credentialsPath) ? 'exists-not-json' : 'missing';
+      } catch {
+        credentialFileState = 'unreadable';
+      }
+    }
+  }
+
+  // Live probe exercising the FULL credential chain end-to-end. Healthy
+  // credentials always yield auth/user-not-found for a nonexistent UID;
+  // any other code pinpoints the exact server-side config failure.
+  let liveProbeErrorCode: string | null = null;
+  let liveProbeErrorDetail: string | null = null;
+  try {
+    await adminAuth.getUser('diagnostic-nonexistent-uid');
+    liveProbeErrorCode = 'unexpected-success';
+  } catch (error) {
+    const err = error as { code?: string; message?: string };
+    liveProbeErrorCode = typeof err.code === 'string' ? err.code : 'unknown-error-code';
+    liveProbeErrorDetail = String(err.message || '').slice(0, 160);
+  }
+
+  return {
+    adminAppInitialized: getApps().length > 0,
+    credentialsEnvSet: Boolean(credentialsPath),
+    credentialFileState,
+    credentialProjectId,
+    expectedProjectId: firebaseConfig.projectId,
+    projectIdMatches: credentialProjectId === firebaseConfig.projectId,
+    liveProbeErrorCode,
+    liveProbeErrorDetail,
+    fcmDryRun: process.env.FCM_DRY_RUN === 'true',
+  };
 }
