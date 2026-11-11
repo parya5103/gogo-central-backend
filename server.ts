@@ -19,7 +19,7 @@ import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
-import { verifyFirebaseIdToken, ROOT_ADMIN_EMAIL, FIREBASE_PROJECT_ID } from './src/lib/firebase-admin.ts';
+import { verifyFirebaseIdToken, ROOT_ADMIN_EMAIL, FIREBASE_PROJECT_ID, adminRuntimeDiagnostics } from './src/lib/firebase-admin.ts';
 import { backendStore } from './src/server/store.ts';
 import {
   resolveDataStore,
@@ -628,6 +628,26 @@ export async function createGoGoApp() {
       database: store().mode === 'postgres' ? 'connected' : 'in-memory-test-mode',
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // Public Firebase Admin runtime diagnostics. Unauthenticated by design:
+  // while server-side token verification is broken, the admin dashboard
+  // cannot authenticate, so gating this on requireAuth would make the
+  // diagnostic unreachable in exactly the situation it exists for. It
+  // returns ONLY booleans, public project identifiers, and raw error
+  // codes from a deliberately failing live probe — never secrets. The
+  // standard /api rate limiter applies.
+  app.get('/api/v1/health/firebase', async (_req: Request, res: Response) => {
+    try {
+      const diagnostics = await adminRuntimeDiagnostics();
+      return res.json({ status: 'ok', firebaseAdmin: diagnostics });
+    } catch (error) {
+      return res.status(500).json({
+        status: 'error',
+        error: 'Firebase diagnostics probe failed.',
+        detail: error instanceof Error ? error.message.slice(0, 160) : 'unknown error',
+      });
+    }
   });
 
   // Protected Admin-Only Detailed Diagnostics Health Check
