@@ -204,10 +204,14 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         extractTrustedClientIp(req)
       );
       return res.status(401).json({
+        // The raw Firebase error code (e.g. auth/argument-error,
+        // app/invalid-credential, auth/id-token-expired) is embedded so a
+        // production error screenshot self-diagnoses the exact server-side
+        // verification failure without dashboard access to security_events.
         error:
           errCode === 'auth/id-token-revoked'
-            ? 'Unauthorized: Firebase session has been revoked.'
-            : 'Unauthorized: Invalid or expired Firebase ID token.',
+            ? `Unauthorized: Firebase session has been revoked. [${errCode}]`
+            : `Unauthorized: Invalid or expired Firebase ID token. [${errCode}]`,
         code: errCode === 'auth/id-token-revoked' ? 'AUTH_TOKEN_REVOKED' : 'AUTH_INVALID_ID_TOKEN',
       });
     }
