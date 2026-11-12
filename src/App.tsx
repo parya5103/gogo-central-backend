@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import { signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { auth, db, googleAuthProvider, handleFirestoreError, OperationType } from './lib/firebase.ts';
+import { auth, db, googleAuthProvider } from './lib/firebase.ts';
 import type {
   GoGoProduct,
   CentralUserRecord,
@@ -197,35 +197,15 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
       if (user) {
+        // Token acquisition is the ONLY thing this block may fail on. It must
+        // be isolated: the optional Firestore profile sync below previously
+        // shared this try/catch, so a Firestore rules rejection bubbled into
+        // this handler and WIPED the already-acquired valid token
+        // (banner: "Signed in, but the Firebase ID token could not be
+        // fetched ... Missing or insufficient permissions").
+        let token: string;
         try {
-          const token = await user.getIdToken();
-          setIdToken(token);
-
-          // Sync authenticated user profile to Firestore if verified
-          if (user.emailVerified) {
-            const userPath = `users/${user.uid}`;
-            try {
-              await setDoc(
-                doc(db, 'users', user.uid),
-                {
-                  uid: user.uid,
-                  displayName: (user.displayName || user.email?.split('@')[0] || 'GoGo Admin').slice(
-                    0,
-                    100
-                  ),
-                  role: user.email === 'aaryapratik@gmail.com' ? 'admin' : 'user',
-                  createdAt: serverTimestamp(),
-                  updatedAt: serverTimestamp(),
-                },
-                { merge: true }
-              );
-            } catch (err) {
-              // Handle Firestore rule error if document already exists with immutable createdAt
-              if (err instanceof Error && err.message.includes('Missing or insufficient permissions')) {
-                handleFirestoreError(err, OperationType.WRITE, userPath);
-              }
-            }
-          }
+          token = await user.getIdToken();
         } catch (err) {
           // Token fetch failed (e.g. network hiccup or revoked session).
           // Never fail silently: the user would look signed in while every
@@ -237,6 +217,37 @@ export default function App() {
               err instanceof Error ? err.message.slice(0, 140) : 'unknown error'
             })`,
           });
+          return;
+        }
+        setIdToken(token);
+
+        // Best-effort profile sync. A failure here is non-fatal by design:
+        // the dashboard works entirely off the backend API + ID token, and
+        // this Firestore write must never invalidate the auth session.
+        if (user.emailVerified) {
+          try {
+            await setDoc(
+              doc(db, 'users', user.uid),
+              {
+                uid: user.uid,
+                displayName: (user.displayName || user.email?.split('@')[0] || 'GoGo Admin').slice(
+                  0,
+                  100
+                ),
+                role: user.email === 'aaryapratik@gmail.com' ? 'admin' : 'user',
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+          } catch (err) {
+            console.warn(
+              'GoGo Central: non-fatal Firestore profile sync failed for users/' +
+                user.uid +
+                ':',
+              err instanceof Error ? err.message : err
+            );
+          }
         }
       } else {
         setIdToken(null);
