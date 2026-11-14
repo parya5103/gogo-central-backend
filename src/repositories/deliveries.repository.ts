@@ -168,6 +168,24 @@ export async function updateDeliveryOutcome(
   );
 }
 
+/**
+ * Permanent-failure receipts, newest first, paginated (admin diagnostics).
+ * Returns only what receipts already carry: no FCM tokens, no contact PII.
+ */
+export async function listFailedPermanentDeliveries(
+  limit: number,
+  offset: number
+): Promise<{ items: DeliveryReceiptRecord[]; total: number }> {
+  const rows = await query<DeliveryRow>(
+    `${SELECT_DELIVERIES} WHERE status = 'failed_permanent' ORDER BY delivered_at DESC LIMIT $1 OFFSET $2`,
+    [limit, offset]
+  );
+  const countRows = await query<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM notification_deliveries WHERE status = 'failed_permanent'`
+  );
+  return { items: rows.map(toRecord), total: Number(countRows[0]?.count || 0) };
+}
+
 export async function countDeliveriesForDevice(deviceId: string): Promise<number> {
   const rows = await query<{ count: string }>(
     'SELECT COUNT(*) AS count FROM notification_deliveries WHERE device_id = $1',

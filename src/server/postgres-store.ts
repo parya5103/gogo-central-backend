@@ -35,7 +35,10 @@ import {
   insertCampaignIfAbsent,
   listCampaigns as repoListCampaigns,
 } from '../repositories/campaigns.repository.ts';
-import { listDeliveries as repoListDeliveries } from '../repositories/deliveries.repository.ts';
+import {
+  listDeliveries as repoListDeliveries,
+  listFailedPermanentDeliveries as repoListFailedPermanentDeliveries,
+} from '../repositories/deliveries.repository.ts';
 import {
   isAdminUid,
   hasUser,
@@ -332,6 +335,13 @@ export class PostgresDataStore implements GoGoDataStore {
     actorId: string
   ): Promise<{ campaign: NotificationCampaignRecord | null; error?: string }> {
     return this.worker.retryFailedCampaign(notificationId, actorId);
+  }
+
+  async listFailedPermanentDeliveries(options: {
+    limit: number;
+    offset: number;
+  }): Promise<{ items: DeliveryReceiptRecord[]; total: number }> {
+    return repoListFailedPermanentDeliveries(options.limit, options.offset);
   }
 
   // Audit & security --------------------------------------------------------------------

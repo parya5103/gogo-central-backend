@@ -141,6 +141,10 @@ export interface GoGoDataStore {
     notificationId: string,
     actorId: string
   ): Promise<{ campaign: NotificationCampaignRecord | null; error?: string }>;
+  listFailedPermanentDeliveries(options: {
+    limit: number;
+    offset: number;
+  }): Promise<{ items: DeliveryReceiptRecord[]; total: number }>;
 
   // Audit & security telemetry
   recordAuditLog(

@@ -264,6 +264,17 @@ export class InMemoryDataStore implements GoGoDataStore {
     return this.engine.retryFailedCampaign(notificationId, actorId);
   }
 
+  async listFailedPermanentDeliveries(options: {
+    limit: number;
+    offset: number;
+  }): Promise<{ items: DeliveryReceiptRecord[]; total: number }> {
+    const all = Array.from(this.engine.deliveries.values())
+      .filter((d) => d.status === 'failed_permanent')
+      .sort((a, b) => (a.deliveredAt < b.deliveredAt ? 1 : -1));
+    const items = all.slice(options.offset, options.offset + options.limit);
+    return { items, total: all.length };
+  }
+
   // Audit & security ---------------------------------------------------------
   async recordAuditLog(
     actorId: string,

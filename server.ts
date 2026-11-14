@@ -1016,6 +1016,20 @@ export async function createGoGoApp() {
     }
   );
 
+  // Failed (Permanent) Deliveries Listing (Admin Only, Paginated Diagnostics)
+  app.get(
+    '/api/v1/notifications/failed-deliveries',
+    standardApiLimiter,
+    requireAuth,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || '50'), 10) || 50, 1), 200);
+      const offset = Math.max(parseInt(String(req.query.offset || '0'), 10) || 0, 0);
+      const { items, total } = await store().listFailedPermanentDeliveries({ limit, offset });
+      return res.json({ deliveries: items, count: items.length, total, limit, offset });
+    }
+  );
+
   // Read Audit Logs (Admin Only, Bounded)
   app.get(
     '/api/v1/audit-logs',
