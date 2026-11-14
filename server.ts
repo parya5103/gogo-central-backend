@@ -445,6 +445,39 @@ export async function createGoGoApp() {
     })
   );
 
+  // 1b. Content-Security-Policy for served SPA/dashboard responses ONLY.
+  // Helmet is configured with contentSecurityPolicy:false because the
+  // JSON API responses must stay untouched (CSP on JSON is meaningless
+  // noise), and the Firebase auth proxy paths (/__/auth/*,
+  // /__/firebase/init.json) serve upstream-signed helper files whose
+  // headers must pass through unmodified for the redirect sign-in flow.
+  // Everything else (the Vite/SPA dashboard) gets a strict CSP. In
+  // non-production the Vite dev pipeline needs unsafe-inline/unsafe-eval
+  // for the React-refresh preamble and HMR; production serves the static
+  // dist bundle and stays strict.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith('/api/') || req.path.startsWith('/__/')) {
+      return next();
+    }
+    const devScriptSrc = process.env.NODE_ENV !== 'production' ? " 'unsafe-inline' 'unsafe-eval'" : '';
+    res.setHeader(
+      'Content-Security-Policy',
+      [
+        "default-src 'self'",
+        "script-src 'self'" + devScriptSrc,
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: https:",
+        "font-src 'self' data:",
+        "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.cloudfunctions.net wss://*.firebaseio.com",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "object-src 'none'",
+      ].join("; ")
+    );
+    return next();
+  });
+
   // 2. Strict CORS Policy for GoGo Domains + Cloud Run Preview
   // Uses the cors options-delegate form (req is available) so rejected origins
   // are logged as security events with the trusted client IP.

@@ -653,6 +653,32 @@ async function runStandaloneSecurityAudit() {
       }
     }
 
+    // 22. [MEDIUM] CSP is applied to SPA/dashboard responses only: present
+    // on the served frontend, absent on JSON API routes and on the
+    // Firebase auth proxy paths (upstream headers must pass through).
+    {
+      const resSpa = await fetch(`${baseUrl}/`);
+      assert.equal(resSpa.headers.get('content-security-policy') !== null, true, 'SPA responses must carry a CSP header');
+      const spaCsp = resSpa.headers.get('content-security-policy') || '';
+      assert.ok(spaCsp.includes("default-src 'self'"), 'CSP must include default-src self');
+      assert.ok(spaCsp.includes("frame-ancestors 'none'"), 'CSP must include frame-ancestors none');
+
+      const resApi = await fetch(`${baseUrl}/api/v1/health`);
+      assert.equal(resApi.headers.get('content-security-policy'), null, 'JSON API responses must NOT carry a CSP header');
+
+      const resProxy = await fetch(`${baseUrl}/__/firebase/init.json`);
+      assert.notEqual(resProxy.status, 500);
+      assert.equal(resProxy.headers.get('content-security-policy'), null, 'Firebase auth proxy responses must NOT carry a CSP header');
+
+      results.push({
+        id: 'REG-22',
+        severity: 'MEDIUM',
+        name: 'CSP On Served SPA/Dashboard Responses Only (API & Firebase Proxy Untouched)',
+        passed: true,
+        detail: 'CSP with default-src self and frame-ancestors none is set on SPA responses; /api/v1/* JSON and /__/ Firebase proxy paths carry no CSP header.',
+      });
+    }
+
     // 18. [HIGH] Health probes are exempt from rate limiting (probe independence).
     // The limiter store is PostgreSQL-backed in production; if the probes were
     // rate-limited, a database outage would fail the limiter's increment and
