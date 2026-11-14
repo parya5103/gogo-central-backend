@@ -185,3 +185,10 @@ New top-level field `fcmDryRun: boolean` — `true` when the server runs with `F
 
 ### Notification matrix coverage
 `tests/notification-matrix.test.ts` (MX-01..MX-11) covers: per-product registration for all five products, duplicate-token refresh, the Firebase auth failure contract, admin-only broadcast protection, user opt-out enforcement, platform preference gates, invalid-token cleanup, ecosystem (`appId: "all-gogo"`, `targetType: "ecosystem"`) target selection, and retry/idempotency behavior. FCM multicast responses are MOCKED via the `GOGO_TEST_IMPORT`-guarded seam; live delivery verification is a manual post-deployment step (`docs/DEPLOYMENT.md`).
+
+## OpenAPI Description
+
+`GET /api/v1/openapi.json` serves an OpenAPI 3.1 document. Request-body
+schemas are generated from the live Zod validators via `z.toJSONSchema` at
+request time, so the document cannot drift from actual validation.
+Staleness is guarded by REG-21 in `tests/security-audit.test.ts`.

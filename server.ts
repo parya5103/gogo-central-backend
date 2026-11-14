@@ -379,6 +379,97 @@ const SendNotificationSchema = z
   })
   .strict();
 
+// Phase 4: machine-readable OpenAPI 3.1 description. Request-body schemas
+// are GENERATED from the live Zod schemas via z.toJSONSchema at call time,
+// so the document cannot silently drift from the actual validation rules.
+// The staleness guard is REG-21 in tests/security-audit.test.ts.
+export function buildOpenApiDocument() {
+  const ref = (name: string) => ({ $ref: '#/components/schemas/' + name });
+  const jsonOk = (description: string) => ({
+    description,
+    content: { 'application/json': { schema: { type: 'object' } } },
+  });
+  return {
+    openapi: '3.1.0',
+    info: {
+      title: 'GoGo Central Backend API',
+      version: '2.1.0',
+      description:
+        'Versioned /api/v1 REST API for the GoGo ecosystem control plane: app registration, device tokens, notification preferences, FCM campaigns, and audit/security telemetry. Request schemas below are generated from the live Zod validators.',
+    },
+    servers: [{ url: '/' }],
+    paths: {
+      '/api/v1/health': { get: { summary: 'Public liveness health check', responses: jsonOk('OK') } },
+      '/api/v1/health/live': { get: { summary: 'Process-only liveness probe (rate-limit exempt)', responses: jsonOk('OK') } },
+      '/api/v1/health/ready': { get: { summary: 'Readiness probe with real PostgreSQL connectivity check (503 while unreachable)', responses: jsonOk('OK') } },
+      '/api/v1/apps': {
+        get: { summary: 'List registered GoGo applications (auth required)', responses: jsonOk('OK') },
+        post: {
+          summary: 'Dynamically register a new GoGo product (admin only)',
+          requestBody: { required: true, content: { 'application/json': { schema: ref('RegisterAppSchema') } } },
+          responses: jsonOk('Created (201) or conflict (409)'),
+        },
+      },
+      '/api/v1/apps/{appId}': {
+        patch: {
+          summary: 'Update application configuration (admin only)',
+          parameters: [{ name: 'appId', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: { required: true, content: { 'application/json': { schema: ref('UpdateAppSchema') } } },
+          responses: jsonOk('OK'),
+        },
+      },
+      '/api/v1/devices': { get: { summary: 'List the caller\'s devices (all devices for admin)', responses: jsonOk('OK') } },
+      '/api/v1/devices/register': {
+        post: {
+          summary: 'Register or refresh a device FCM token (bound to the verified UID)',
+          requestBody: { required: true, content: { 'application/json': { schema: ref('RegisterDeviceSchema') } } },
+          responses: jsonOk('Created (201)'),
+        },
+      },
+      '/api/v1/devices/{deviceId}': {
+        delete: {
+          summary: 'Revoke a device FCM token (strict owner or admin)',
+          parameters: [{ name: 'deviceId', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: jsonOk('OK'),
+        },
+      },
+      '/api/v1/preferences': { get: { summary: 'Get the authenticated user\'s notification preferences', responses: jsonOk('OK') } },
+      '/api/v1/preferences/{appId}': {
+        put: {
+          summary: 'Update per-user, per-product notification preferences',
+          parameters: [{ name: 'appId', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: { required: true, content: { 'application/json': { schema: ref('UpdatePreferenceSchema') } } },
+          responses: jsonOk('OK'),
+        },
+      },
+      '/api/v1/notifications/send': {
+        post: {
+          summary: 'Dispatch or schedule a central FCM notification campaign (admin only)',
+          requestBody: { required: true, content: { 'application/json': { schema: ref('SendNotificationSchema') } } },
+          responses: jsonOk('Created (201), duplicate (200), or validation error (400/404/409/422)'),
+        },
+      },
+      '/api/v1/notifications/{notificationId}/retry': {
+        post: {
+          summary: 'Retry failed deliveries of a campaign (admin only, bounded by fcm_max_retries)',
+          parameters: [{ name: 'notificationId', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: jsonOk('OK'),
+        },
+      },
+      '/api/v1/overview': { get: { summary: 'Complete overview snapshot scoped by RBAC role', responses: jsonOk('OK') } },
+    },
+    components: {
+      schemas: {
+        RegisterAppSchema: z.toJSONSchema(RegisterAppSchema),
+        UpdateAppSchema: z.toJSONSchema(UpdateAppSchema),
+        RegisterDeviceSchema: z.toJSONSchema(RegisterDeviceSchema),
+        UpdatePreferenceSchema: z.toJSONSchema(UpdatePreferenceSchema),
+        SendNotificationSchema: z.toJSONSchema(SendNotificationSchema),
+      },
+    },
+  };
+}
+
 // Upstream origin for the transparent Firebase auth handler proxy (mounted in
 // createGoGoApp as step 2b). Override with FIREBASE_AUTH_PROXY_ORIGIN when the
 // Firebase project changes.
@@ -593,6 +684,14 @@ export async function createGoGoApp() {
   // ============================================================================
   // Versioned REST API Routes (/api/v1)
   // ============================================================================
+
+  // Phase 4: machine-readable OpenAPI 3.1 description. Generated from the
+  // live Zod request schemas at request time (see buildOpenApiDocument), so
+  // it cannot drift from actual validation. Read-only; no behavior change.
+  app.get('/api/v1/openapi.json', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.json(buildOpenApiDocument());
+  });
 
   // Public Liveness Health Check (Zero internal project IDs, versions, or metrics exposed)
   app.get('/api/v1/health', (_req: Request, res: Response) => {
