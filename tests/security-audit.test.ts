@@ -20,6 +20,7 @@ import type { Server } from 'node:http';
 import { GoGoCentralBackendEngine } from '../src/server/store.ts';
 import { runSecurityRulesVerification } from '../firestore.rules.test.ts';
 import { setTestFirebaseOverrides, ROOT_ADMIN_EMAIL } from '../src/lib/firebase-admin.ts';
+import type { Request, Response, NextFunction } from 'express';
 
 interface AuditTestResult {
   id: string;
@@ -34,6 +35,20 @@ async function runStandaloneSecurityAudit() {
   const { createGoGoApp, extractTrustedClientIp } = await import('../server.ts');
   const results: AuditTestResult[] = [];
   const app = await createGoGoApp();
+
+  // Emulate startServer's SPA mounting: in every real deployment (Vite dev
+  // middleware or static dist + app.get('*')), non-API GET routes terminate
+  // in the SPA index. Without a terminal handler, Express's finalhandler
+  // answers unmatched routes and OVERWRITES our CSP header with its own
+  // "Content-Security-Policy: default-src 'none'", which misrepresents the
+  // served dashboard headers in this suite.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api/') && !req.path.startsWith('/__/')) {
+      res.status(200).type('html').send('<!doctype html><html><body>gogo-dashboard-stub</body></html>');
+      return;
+    }
+    return next();
+  });
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
