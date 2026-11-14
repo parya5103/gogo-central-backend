@@ -361,6 +361,11 @@ const SendNotificationSchema = z
   .object({
     idempotencyKey: z.string().min(6).max(128).regex(/^[a-zA-Z0-9_-]+$/),
     appId: z.string().min(2).max(64).regex(/^[a-z0-9-]+$/),
+    // `topic` is deliberately NOT an accepted value: FCM topic delivery is not
+    // implemented, and accepting it here would silently degrade a topic send
+    // into an app-wide broadcast (worker resolveCandidates treats unknown
+    // scopes as broadcast). Rejected at validation with HTTP 400 until genuine
+    // topic delivery exists.
     targetType: z.enum([
       'individual',
       'group',
@@ -368,7 +373,6 @@ const SendNotificationSchema = z
       'ecosystem',
       'broadcast',
       'targeted',
-      'topic',
     ]),
     targetValue: z.string().min(1).max(128),
     platform: z.enum(['all', 'web', 'android']).default('all'),
@@ -970,16 +974,6 @@ export async function createGoGoApp() {
       }
 
       const data = parsed.data;
-      // Topic targeting has no delivery implementation (no topic
-      // subscriptions exist). Reject explicitly instead of silently
-      // broadcasting to every device.
-      if (data.targetType === 'topic') {
-        return res.status(400).json({
-          error:
-            'Topic targeting is not implemented. Use individual, group, product, ecosystem, broadcast or targeted.',
-          code: 'TARGETING_TOPIC_NOT_IMPLEMENTED',
-        });
-      }
       if (data.appId !== 'all-gogo' && !(await store().hasApp(data.appId))) {
         return res
           .status(404)

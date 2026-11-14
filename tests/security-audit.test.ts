@@ -692,6 +692,61 @@ async function runStandaloneSecurityAudit() {
       });
     }
 
+    // 19. [HIGH] Topic targeting is rejected at validation (never broadcast).
+    {
+      const resTopic = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: {
+          'X-GoGo-Sandbox-Role': 'admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          idempotencyKey: `idem_topic_reject_${Date.now()}`,
+          appId: 'pika-news',
+          targetType: 'topic',
+          targetValue: 'breaking-news',
+          platform: 'all',
+          title: 'Topic Send',
+          body: 'Must be rejected until topic delivery exists.',
+          deepLink: 'https://gogocompany.in/pikanews/',
+        }),
+      });
+      assert.equal(resTopic.status, 400, 'topic targetType must be rejected with HTTP 400');
+      const topicBody = (await resTopic.json()) as { error?: string; details?: unknown };
+      assert.ok(
+        JSON.stringify(topicBody.details ?? {}).includes('topic'),
+        'validation details must name "topic" as the rejected value'
+      );
+
+      // Existing targeting modes keep working: broadcast is still accepted.
+      const resBroadcast = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: {
+          'X-GoGo-Sandbox-Role': 'admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          idempotencyKey: `idem_broadcast_ok_${Date.now()}`,
+          appId: 'pika-news',
+          targetType: 'broadcast',
+          targetValue: 'all',
+          platform: 'all',
+          title: 'Broadcast Still Works',
+          body: 'Existing targeting modes are unaffected by the topic rejection.',
+          deepLink: 'https://gogocompany.in/pikanews/',
+        }),
+      });
+      assert.equal(resBroadcast.status, 201, 'existing targeting modes must remain accepted');
+
+      results.push({
+        id: 'REG-19',
+        severity: 'HIGH',
+        name: 'Topic Targeting Rejected At Validation (No Silent Broadcast Fallback)',
+        passed: true,
+        detail: 'targetType "topic" returns HTTP 400 with validation details naming topic; broadcast targeting still returns 201 (existing modes unaffected).',
+      });
+    }
+
     console.log(
       JSON.stringify(
         {
