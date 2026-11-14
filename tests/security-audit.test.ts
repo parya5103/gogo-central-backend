@@ -673,10 +673,17 @@ async function runStandaloneSecurityAudit() {
         }),
       });
       assert.equal(resTopic.status, 400, 'topic targetType must be rejected with HTTP 400');
-      const topicBody = (await resTopic.json()) as { error?: string; details?: unknown };
+      const topicBody = (await resTopic.json()) as {
+        error?: string;
+        details?: Array<{ path?: string[]; message?: string }>;
+      };
+      // Version-safe: Zod 4 issues expose the offending path and accepted
+      // values, not always the rejected literal. Assert the 400 names the
+      // targetType field as the invalid input.
       assert.ok(
-        JSON.stringify(topicBody.details ?? {}).includes('topic'),
-        'validation details must name "topic" as the rejected value'
+        Array.isArray(topicBody.details) &&
+          topicBody.details.some((issue) => (issue.path ?? []).includes('targetType')),
+        'validation details must flag the targetType field as invalid'
       );
 
       // Existing targeting modes keep working: broadcast is still accepted.
