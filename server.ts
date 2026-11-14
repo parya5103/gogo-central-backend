@@ -17,6 +17,7 @@ import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { z } from 'zod';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
 import { verifyFirebaseIdToken, ROOT_ADMIN_EMAIL, FIREBASE_PROJECT_ID, adminRuntimeDiagnostics } from './src/lib/firebase-admin.ts';
@@ -435,6 +436,38 @@ export async function createGoGoApp() {
   // This ensures req.ip is computed from the right-most proxy hop and prevents
   // clients from spoofing left-most X-Forwarded-For entries.
   app.set('trust proxy', 1);
+
+  // 0. Request ID + structured request logging. Every response carries an
+  // x-request-id header (client-supplied IDs are echoed only when they match
+  // a strict format; otherwise a fresh UUID is minted) and each request is
+  // logged as one JSON line with method/path/status/duration. Logs never
+  // include bodies, tokens, IPs, or user identifiers.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const incoming = req.headers['x-request-id'];
+    const requestId =
+      typeof incoming === 'string' && /^[a-zA-Z0-9-]{8,64}$/.test(incoming)
+        ? incoming
+        : randomUUID();
+    res.setHeader('x-request-id', requestId);
+    const startNs = process.hrtime.bigint();
+    res.on('finish', () => {
+      const durationMs = Math.round((Number(process.hrtime.bigint() - startNs) / 1e6) * 100) / 100;
+      console.log(
+        JSON.stringify({
+          level: 'INFO',
+          service: 'gogo-central-backend',
+          message: 'request',
+          method: req.method,
+          path: req.path,
+          status: res.statusCode,
+          durationMs,
+          requestId,
+          timestamp: new Date().toISOString(),
+        })
+      );
+    });
+    next();
+  });
 
   // 1. Security Headers via Helmet
   app.use(

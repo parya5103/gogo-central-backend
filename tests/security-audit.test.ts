@@ -653,6 +653,64 @@ async function runStandaloneSecurityAudit() {
       }
     }
 
+    // 20. [MEDIUM] Request ID middleware: x-request-id header + structured log.
+    {
+      const originalLog = console.log;
+      const captured: string[] = [];
+      try {
+        console.log = (...args: unknown[]) => {
+          captured.push(String(args[0]));
+        };
+
+        // 20a. Fresh UUID minted and echoed in the header.
+        const resFresh = await fetch(`${baseUrl}/api/v1/health/live`);
+        const freshId = resFresh.headers.get('x-request-id');
+        assert.ok(freshId, 'every response must carry an x-request-id header');
+        assert.match(freshId!, /^[0-9a-f-]{36}$/, 'minted request id must be a UUID');
+
+        // 20b. Client-supplied valid id is echoed; log line correlates.
+        const clientRef = 'req-test-echo-12345678';
+        const resEcho = await fetch(`${baseUrl}/api/v1/health/live`, {
+          headers: { 'x-request-id': clientRef },
+        });
+        assert.equal(resEcho.headers.get('x-request-id'), clientRef, 'valid client x-request-id must be echoed');
+
+        // 20c. Malicious / malformed id is NOT echoed (a fresh UUID replaces it).
+        const resBad = await fetch(`${baseUrl}/api/v1/health/live`, {
+          headers: { 'x-request-id': 'bad id with spaces
+and newline' },
+        });
+        const badId = resBad.headers.get('x-request-id') || '';
+        assert.notEqual(badId, 'bad id with spaces', 'malformed request id must not be echoed');
+        assert.match(badId, /^[0-9a-f-]{36}$/, 'malformed id must be replaced by a UUID');
+
+        // 20d. Structured request log: JSON line with correlating requestId,
+        // method/path/status/duration, and no sensitive fields.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const logLines = captured
+          .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+          .filter((entry) => entry && entry.message === 'request' && entry.requestId === clientRef);
+        assert.ok(logLines.length >= 1, 'a structured request log line must be emitted for the echoed request');
+        const entry = logLines[logLines.length - 1];
+        assert.equal(entry.level, 'INFO');
+        assert.equal(entry.service, 'gogo-central-backend');
+        assert.equal(entry.method, 'GET');
+        assert.equal(entry.status, 200);
+        assert.equal(typeof entry.durationMs, 'number');
+        assert.ok(!('authorization' in entry) && !('body' in entry) && !('token' in entry), 'request logs must not contain sensitive fields');
+      } finally {
+        console.log = originalLog;
+      }
+
+      results.push({
+        id: 'REG-20',
+        severity: 'MEDIUM',
+        name: 'Request ID Middleware (x-request-id Echo/Guard + Structured Request Logs)',
+        passed: true,
+        detail: 'Responses carry x-request-id (UUID minted; valid client ids echoed; malformed ids replaced); structured JSON request log with method/path/status/durationMs/requestId and no sensitive fields.',
+      });
+    }
+
     // 18. [HIGH] Health probes are exempt from rate limiting (probe independence).
     // The limiter store is PostgreSQL-backed in production; if the probes were
     // rate-limited, a database outage would fail the limiter's increment and
