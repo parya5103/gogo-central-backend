@@ -124,15 +124,16 @@ async function main(): Promise<void> {
   // Fresh CI databases start empty; on a reused disposable DB migrations are
   // skipped, which PGT-02 also proves. Both paths are valid PASS states.
 
-  await test('PGT-01', 'Fresh migration applies 001 + 002 with checksum tracking (advisory-lock serialized)', async () => {
+  await test('PGT-01', 'Fresh migration applies 001 + 002 + 003 with checksum tracking (advisory-lock serialized)', async () => {
     // Two concurrent runners must serialize on the advisory lock: each
     // migration is applied at most once, the second runner skips what the
     // first applied, and neither corrupts schema_migrations.
     const [reportA, reportB] = await Promise.all([runMigrations(), runMigrations()]);
     const applied = await listAppliedMigrations();
-    assertEqual(applied.length, 2, 'both migrations tracked in schema_migrations');
+    assertEqual(applied.length, 3, 'all migrations tracked in schema_migrations');
     assert(applied.some((m) => m.version === '001'), '001 recorded');
     assert(applied.some((m) => m.version === '002'), '002 recorded');
+    assert(applied.some((m) => m.version === '003'), '003 recorded');
     assert(
       applied.every((m) => /^[a-f0-9]{64}$/.test(m.checksum)),
       'checksums are sha256 hex'
@@ -152,9 +153,9 @@ async function main(): Promise<void> {
   await test('PGT-02', 'Repeated migration is a safe no-op (idempotent runner)', async () => {
     const report = await runMigrations();
     assertEqual(report.applied.length, 0, 'nothing re-applied');
-    assert(report.skipped.length === 2, 'both known migrations skipped');
+    assert(report.skipped.length === 3, 'all known migrations skipped');
     const applied = await listAppliedMigrations();
-    assertEqual(applied.length, 2, 'still exactly two tracked migrations');
+    assertEqual(applied.length, 3, 'still exactly three tracked migrations');
   });
 
   await test('PGT-03', 'Connection failure is detected, sanitized, and mapped', async () => {
@@ -853,7 +854,7 @@ async function main(): Promise<void> {
     }
     const retry = await runMigrations();
     assertEqual(retry.applied.length, 0, 'retry applies nothing');
-    assertEqual(retry.skipped.length, 2, 'known migrations still intact after the failed run');
+    assertEqual(retry.skipped.length, 3, 'known migrations still intact after the failed run');
   });
 
   await test('PGT-22', 'Firebase sign-in provider is mapped from the verified token, never hardcoded', async () => {
