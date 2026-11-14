@@ -174,7 +174,7 @@ export class NotificationWorker {
     // Fail-closed: topic targeting has no device-subscription model yet.
     // Never degrade a topic campaign into a broadcast.
     if (campaign.targetType === 'topic') {
-      throw new Error('TOPIC_TARGETING_UNSUPPORTED: FCM topic delivery is not implemented.');
+      throw new Error('TOPIC_TARGETING_NOT_IMPLEMENTED: FCM topic delivery is not implemented.');
     }
     const devices = await listDevices(
       campaign.appId !== 'all-gogo' ? { appId: campaign.appId } : {}

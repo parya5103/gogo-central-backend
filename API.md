@@ -139,7 +139,7 @@ Dispatches or schedules an FCM notification campaign with durable, database-back
   - `"group"` — Send to a selected user segment (`targetValue: "exam-aspirants" | "vip-gamers" | "breaking-news"`)
   - `"product"` — Broadcast to all opted-in users of `appId` (`targetValue: "all"`)
   - `"ecosystem"` — Broadcast announcement across **all GoGo products** (`appId: "all-gogo"`, `targetValue: "all"`)
-  - `"topic"` — **Rejected with `400 TARGETING_TOPIC_NOT_IMPLEMENTED`.** Topic delivery is not implemented (no topic subscriptions exist); it is never silently converted into a broadcast.
+  - `"topic"` — **Not an accepted value.** Requests fail schema validation with `400 Invalid notification campaign payload` (Zod issue on `targetType`). Topic delivery is not implemented (no topic subscriptions exist); it is never silently converted into a broadcast. Defense-in-depth: the delivery worker also fails closed with `TOPIC_TARGETING_NOT_IMPLEMENTED` if a topic campaign ever reaches it.
 
 - **`200 OK` with `duplicatePrevented: true`** — the idempotency key was seen before with the same payload; the original campaign is returned and nothing is re-sent.
 - **`409 Conflict` (`IDEMPOTENCY_PAYLOAD_MISMATCH`)** — the idempotency key was reused with a different payload; nothing is dispatched.

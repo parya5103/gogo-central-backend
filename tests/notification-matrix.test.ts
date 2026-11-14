@@ -203,7 +203,7 @@ async function tierAHttpTests(): Promise<void> {
       assertEqual(resAdmin.status, 201, 'admin can dispatch an ecosystem campaign');
     });
 
-    await test('MX-12', 'HTTP: topic targeting explicitly rejected (400 TARGETING_TOPIC_NOT_IMPLEMENTED), never silently broadcast', async () => {
+    await test('MX-12', 'HTTP: topic targeting explicitly rejected at validation (400), never silently broadcast', async () => {
       const resTopic = await fetch(`${baseUrl}/api/v1/notifications/send`, {
         method: 'POST',
         headers: { 'X-GoGo-Sandbox-Role': 'admin', 'Content-Type': 'application/json' },
@@ -219,9 +219,19 @@ async function tierAHttpTests(): Promise<void> {
           scheduledFor: null,
         }),
       });
-      const topicBody = (await resTopic.json()) as { code?: string };
+      // Rejected at schema validation: 400 with a Zod issue on the
+      // targetType field (version-safe assertion; Zod 4 issues expose the
+      // path and accepted values, not always the rejected literal).
+      const topicBody = (await resTopic.json()) as {
+        error?: string;
+        details?: Array<{ path?: string[]; message?: string }>;
+      };
       assertEqual(resTopic.status, 400, 'topic targeting rejected with 400');
-      assertEqual(topicBody.code, 'TARGETING_TOPIC_NOT_IMPLEMENTED', 'explicit topic rejection contract');
+      assert(
+        Array.isArray(topicBody.details) &&
+          topicBody.details.some((issue) => (issue.path ?? []).includes('targetType')),
+        'explicit topic rejection contract: validation issue on targetType'
+      );
 
       // Existing targeting modes are unaffected by the topic guard.
       const resProduct = await fetch(`${baseUrl}/api/v1/notifications/send`, {
