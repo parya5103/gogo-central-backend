@@ -658,10 +658,12 @@ async function runStandaloneSecurityAudit() {
     // Firebase auth proxy paths (upstream headers must pass through).
     {
       const resSpa = await fetch(`${baseUrl}/`);
-      assert.equal(resSpa.headers.get('content-security-policy') !== null, true, 'SPA responses must carry a CSP header');
       const spaCsp = resSpa.headers.get('content-security-policy') || '';
-      assert.ok(spaCsp.includes("default-src 'self'"), 'CSP must include default-src self');
-      assert.ok(spaCsp.includes("frame-ancestors 'none'"), 'CSP must include frame-ancestors none');
+      assert.ok(
+        spaCsp.includes("default-src 'self'"),
+        `SPA CSP invalid (status=${resSpa.status}, csp=${JSON.stringify(spaCsp)}, headers=${JSON.stringify([...resSpa.headers.keys()])})`
+      );
+      assert.ok(spaCsp.includes("frame-ancestors 'none'"), `SPA CSP missing frame-ancestors (csp=${JSON.stringify(spaCsp)})`);
 
       const resApi = await fetch(`${baseUrl}/api/v1/health`);
       assert.equal(resApi.headers.get('content-security-policy'), null, 'JSON API responses must NOT carry a CSP header');
