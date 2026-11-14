@@ -677,7 +677,10 @@ async function runStandaloneSecurityAudit() {
 
         // 20c. Malicious / malformed id is NOT echoed (a fresh UUID replaces it).
         const resBad = await fetch(`${baseUrl}/api/v1/health/live`, {
-          headers: { 'x-request-id': 'bad id with spaces\\nand newline' }, 'malformed request id must not be echoed');
+          headers: { 'x-request-id': 'bad id with spaces\\nand newline' },
+        });
+        const badId = resBad.headers.get('x-request-id') || '';
+        assert.notEqual(badId, 'bad id with spaces', 'malformed request id must not be echoed');
         assert.match(badId, /^[0-9a-f-]{36}$/, 'malformed id must be replaced by a UUID');
 
         // 20d. Structured request log: JSON line with correlating requestId,
