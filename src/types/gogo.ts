@@ -6,7 +6,7 @@
 export type ProductCategory = 'portal' | 'civic' | 'news' | 'game';
 export type ClientPlatform = 'web' | 'android';
 export type TargetScope = 'individual' | 'group' | 'product' | 'ecosystem' | 'broadcast' | 'targeted' | 'topic';
-export type CampaignStatus = 'queued' | 'scheduled' | 'processing' | 'delivered' | 'partial_failure' | 'failed';
+export type CampaignStatus = 'queued' | 'scheduled' | 'processing' | 'delivered' | 'partial_failure' | 'failed' | 'cancelled';
 
 export interface GoGoProduct {
   appId: string;

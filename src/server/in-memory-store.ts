@@ -264,6 +264,15 @@ export class InMemoryDataStore implements GoGoDataStore {
     return this.engine.retryFailedCampaign(notificationId, actorId);
   }
 
+  async cancelCampaign(notificationId: string): Promise<NotificationCampaignRecord | null> {
+    const campaign = this.engine.campaigns.get(notificationId);
+    if (!campaign) return null;
+    if (campaign.status !== 'queued' && campaign.status !== 'scheduled') return null;
+    campaign.status = 'cancelled';
+    campaign.updatedAt = new Date().toISOString();
+    return campaign;
+  }
+
   // Audit & security ---------------------------------------------------------
   async recordAuditLog(
     actorId: string,

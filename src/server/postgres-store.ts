@@ -34,6 +34,7 @@ import {
   getCampaignByIdempotencyKey,
   insertCampaignIfAbsent,
   listCampaigns as repoListCampaigns,
+  cancelCampaign as repoCancelCampaign,
 } from '../repositories/campaigns.repository.ts';
 import { listDeliveries as repoListDeliveries } from '../repositories/deliveries.repository.ts';
 import {
@@ -332,6 +333,10 @@ export class PostgresDataStore implements GoGoDataStore {
     actorId: string
   ): Promise<{ campaign: NotificationCampaignRecord | null; error?: string }> {
     return this.worker.retryFailedCampaign(notificationId, actorId);
+  }
+
+  async cancelCampaign(notificationId: string): Promise<NotificationCampaignRecord | null> {
+    return repoCancelCampaign(notificationId);
   }
 
   // Audit & security --------------------------------------------------------------------

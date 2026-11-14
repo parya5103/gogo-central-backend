@@ -653,6 +653,71 @@ async function runStandaloneSecurityAudit() {
       }
     }
 
+    // 18b. [HIGH] Campaign cancellation: admin-only, atomic, fail-closed.
+    {
+      const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const resSend = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: {
+          'X-GoGo-Sandbox-Role': 'admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          idempotencyKey: `idem_cancel_${Date.now()}`,
+          appId: 'sarkari-sarthi',
+          targetType: 'product',
+          targetValue: 'all',
+          platform: 'all',
+          title: 'Scheduled Maintenance',
+          body: 'Scheduled campaign that will be cancelled.',
+          deepLink: 'https://gogocompany.in/sarkari-sarthi/',
+          scheduledFor: future,
+        }),
+      });
+      assert.equal(resSend.status, 201, 'Scheduled dispatch returns 201');
+      const sendBody = (await resSend.json()) as { campaign: { notificationId: string; status: string } };
+      assert.equal(sendBody.campaign.status, 'scheduled', 'dispatch with future scheduledFor stays scheduled');
+      const notificationId = sendBody.campaign.notificationId;
+
+      // Non-admin is rejected by RBAC.
+      const resForbidden = await fetch(`${baseUrl}/api/v1/notifications/${notificationId}/cancel`, {
+        method: 'POST',
+        headers: { 'X-GoGo-Sandbox-Role': 'user' },
+      });
+      assert.equal(resForbidden.status, 403, 'user role must get 403 on cancel');
+
+      // Admin cancels the scheduled campaign.
+      const resCancel = await fetch(`${baseUrl}/api/v1/notifications/${notificationId}/cancel`, {
+        method: 'POST',
+        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+      });
+      assert.equal(resCancel.status, 200);
+      const cancelBody = (await resCancel.json()) as { campaign: { status: string } };
+      assert.equal(cancelBody.campaign.status, 'cancelled');
+
+      // Cancelling again is a conflict (no longer cancellable).
+      const resAgain = await fetch(`${baseUrl}/api/v1/notifications/${notificationId}/cancel`, {
+        method: 'POST',
+        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+      });
+      assert.equal(resAgain.status, 409);
+
+      // Unknown campaign id -> 404.
+      const resMissing = await fetch(`${baseUrl}/api/v1/notifications/notif_does_not_exist/cancel`, {
+        method: 'POST',
+        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+      });
+      assert.equal(resMissing.status, 404);
+
+      results.push({
+        id: 'REG-19',
+        severity: 'HIGH',
+        name: 'Campaign Cancellation Admin-Only, Atomic, Fail-Closed',
+        passed: true,
+        detail:
+          'Scheduled campaign cancelled by admin (200, status=cancelled); user role 403; re-cancel 409; unknown id 404.',
+      });
+    }
     // 18. [HIGH] Health probes are exempt from rate limiting (probe independence).
     // The limiter store is PostgreSQL-backed in production; if the probes were
     // rate-limited, a database outage would fail the limiter's increment and

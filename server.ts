@@ -1016,6 +1016,37 @@ export async function createGoGoApp() {
     }
   );
 
+  // Cancel a Queued/Scheduled Campaign (Admin Only, Atomic Status Transition)
+  app.post(
+    '/api/v1/notifications/:notificationId/cancel',
+    sensitiveMutationLimiter,
+    requireAuth,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const notificationId = String(req.params.notificationId);
+      const existing = await store().getCampaign(notificationId);
+      if (!existing) {
+        return res.status(404).json({ error: 'Notification campaign not found.' });
+      }
+      const cancelled = await store().cancelCampaign(notificationId);
+      if (!cancelled) {
+        return res.status(409).json({
+          error: 'Campaign is not cancellable (only queued or scheduled campaigns can be cancelled).',
+          campaign: existing,
+        });
+      }
+      await store().recordAuditLog(
+        req.user!.uid,
+        cancelled.appId,
+        'NOTIFICATION_CANCELLED',
+        notificationId,
+        'warn',
+        `Cancelled campaign (targetType=${cancelled.targetType}) before dispatch.`
+      );
+      return res.json({ campaign: cancelled });
+    }
+  );
+
   // Read Audit Logs (Admin Only, Bounded)
   app.get(
     '/api/v1/audit-logs',

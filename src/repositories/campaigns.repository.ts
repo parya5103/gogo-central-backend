@@ -131,6 +131,28 @@ export async function getCampaign(
   return rows[0] ? toRecord(rows[0]) : null;
 }
 
+/**
+ * Atomic cancellation. Only queued/scheduled campaigns can be cancelled;
+ * a campaign already 'processing' finishes in flight (the worker never
+ * claims 'cancelled', so a cancelled row is never picked up).
+ * Returns the cancelled record, or null when the campaign does not exist
+ * or is not in a cancellable state.
+ */
+export async function cancelCampaign(
+  notificationId: string
+): Promise<NotificationCampaignRecord | null> {
+  const updated = await query<{ notification_id: string }>(
+    `UPDATE notification_campaigns
+     SET status = 'cancelled', processing_locked_at = NULL, locked_by = NULL,
+         next_retry_at = NULL, updated_at = NOW()
+     WHERE notification_id = $1 AND status IN ('queued', 'scheduled')
+     RETURNING notification_id`,
+    [notificationId]
+  );
+  if (updated.length === 0) return null;
+  return getCampaign(notificationId);
+}
+
 export async function listCampaigns(filter: {
   visibleToUid?: string;
   limit?: number;

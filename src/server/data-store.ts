@@ -141,6 +141,7 @@ export interface GoGoDataStore {
     notificationId: string,
     actorId: string
   ): Promise<{ campaign: NotificationCampaignRecord | null; error?: string }>;
+  cancelCampaign(notificationId: string): Promise<NotificationCampaignRecord | null>;
 
   // Audit & security telemetry
   recordAuditLog(
