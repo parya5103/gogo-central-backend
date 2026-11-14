@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * GoGo Central Backend — Ecosystem Notification Matrix Tests (MX-01..MX-11)
+ * GoGo Central Backend — Ecosystem Notification Matrix Tests (MX-01..MX-12)
  *
  * End-to-end matrix for the five-product notification system:
  *   Tier A (HTTP, MX-01..MX-03): the real Express app on the in-memory test
@@ -201,6 +201,45 @@ async function tierAHttpTests(): Promise<void> {
         body: campaignPayload(`mx_http_admin_${Date.now()}`),
       });
       assertEqual(resAdmin.status, 201, 'admin can dispatch an ecosystem campaign');
+    });
+
+    await test('MX-12', 'HTTP: topic targeting explicitly rejected (400 TARGETING_TOPIC_NOT_IMPLEMENTED), never silently broadcast', async () => {
+      const resTopic = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: { 'X-GoGo-Sandbox-Role': 'admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey: `mx_http_topic_${Date.now()}`,
+          appId: 'all-gogo',
+          targetType: 'topic',
+          targetValue: 'news-daily',
+          platform: 'all',
+          title: 'MX-12 topic probe',
+          body: 'must be rejected, never broadcast',
+          deepLink: DEEPLINK,
+          scheduledFor: null,
+        }),
+      });
+      const topicBody = (await resTopic.json()) as { code?: string };
+      assertEqual(resTopic.status, 400, 'topic targeting rejected with 400');
+      assertEqual(topicBody.code, 'TARGETING_TOPIC_NOT_IMPLEMENTED', 'explicit topic rejection contract');
+
+      // Existing targeting modes are unaffected by the topic guard.
+      const resProduct = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: { 'X-GoGo-Sandbox-Role': 'admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey: `mx_http_prod_${Date.now()}`,
+          appId: 'pika-news',
+          targetType: 'product',
+          targetValue: 'all',
+          platform: 'all',
+          title: 'MX-12 product probe',
+          body: 'existing targeting modes still dispatch',
+          deepLink: DEEPLINK,
+          scheduledFor: null,
+        }),
+      });
+      assertEqual(resProduct.status, 201, 'non-topic targeting modes still dispatch (no regression)');
     });
   } finally {
     server.close();

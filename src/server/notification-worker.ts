@@ -171,6 +171,10 @@ export class NotificationWorker {
   private async resolveCandidates(
     campaign: Pick<NotificationCampaignRecord, 'appId' | 'platform' | 'targetType' | 'targetValue'>
   ): Promise<DeviceTokenRecord[]> {
+    if (campaign.targetType === 'topic') {
+      // Fail loudly, never silently broadcast: topic delivery is unimplemented.
+      throw new Error('TOPIC_TARGETING_NOT_IMPLEMENTED');
+    }
     const devices = await listDevices(
       campaign.appId !== 'all-gogo' ? { appId: campaign.appId } : {}
     );

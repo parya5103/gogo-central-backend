@@ -970,6 +970,16 @@ export async function createGoGoApp() {
       }
 
       const data = parsed.data;
+      // Topic targeting has no delivery implementation (no topic
+      // subscriptions exist). Reject explicitly instead of silently
+      // broadcasting to every device.
+      if (data.targetType === 'topic') {
+        return res.status(400).json({
+          error:
+            'Topic targeting is not implemented. Use individual, group, product, ecosystem, broadcast or targeted.',
+          code: 'TARGETING_TOPIC_NOT_IMPLEMENTED',
+        });
+      }
       if (data.appId !== 'all-gogo' && !(await store().hasApp(data.appId))) {
         return res
           .status(404)
