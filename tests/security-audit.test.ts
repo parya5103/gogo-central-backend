@@ -715,7 +715,6 @@ async function runStandaloneSecurityAudit() {
       });
     }
 
-
     // 18. [HIGH] Health probes are exempt from rate limiting (probe independence).
     // The limiter store is PostgreSQL-backed in production; if the probes were
     // rate-limited, a database outage would fail the limiter's increment and
@@ -833,5 +832,3 @@ runStandaloneSecurityAudit().catch((err) => {
   console.error('SECURITY AUDIT REGRESSION SUITE FAILED:', err);
   process.exit(1);
 });
-
-// (no-op comment to retrigger mergeability computation)
