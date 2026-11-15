@@ -772,7 +772,7 @@ async function runStandaloneSecurityAudit() {
       assert.equal(resMissing.status, 404);
 
       results.push({
-        id: 'REG-19',
+        id: 'REG-23',
         severity: 'HIGH',
         name: 'Campaign Cancellation Admin-Only, Atomic, Fail-Closed',
         passed: true,
