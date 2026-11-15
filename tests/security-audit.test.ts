@@ -833,3 +833,5 @@ runStandaloneSecurityAudit().catch((err) => {
   console.error('SECURITY AUDIT REGRESSION SUITE FAILED:', err);
   process.exit(1);
 });
+
+// (no-op comment to retrigger mergeability computation)
