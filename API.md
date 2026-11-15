@@ -174,6 +174,13 @@ Safely retries temporary delivery failures using bounded exponential backoff whi
 
 Note on delivery metrics: `sentCount` counts only confirmed deliveries, `failedCount` counts transient/expired-token/permanent failures, and devices skipped by user notification preferences or quiet hours are recorded as `skipped_preference` / `skipped_quiet_hours` receipts and counted in neither. Counts are derived strictly from per-device delivery receipts in PostgreSQL; there is no inflation by `registeredDevicesCount`. Delivery receipt statuses: `delivered`, `failed_transient`, `failed_expired_token`, `failed_permanent`, `skipped_preference`, `skipped_quiet_hours`. When `FCM_DRY_RUN=true`, FCM validates requests without delivering and the resulting receipts carry `dryrun:`-prefixed message IDs (never real delivery confirmations); delivery is at-least-once by design (see `SECURITY.md`).
 
+## OpenAPI Description
+
+`GET /api/v1/openapi.json` serves an OpenAPI 3.1 document. Request-body
+schemas are generated from the live Zod validators via `z.toJSONSchema` at
+request time, so the document cannot drift from actual validation.
+Staleness is guarded by REG-21 in `tests/security-audit.test.ts`.
+
 ---
 
 ## Addendum — v2.1.0 (Ecosystem Notification Readiness)
@@ -187,10 +194,3 @@ New top-level field `fcmDryRun: boolean` — `true` when the server runs with `F
 ### Notification matrix coverage
 `tests/notification-matrix.test.ts` (MX-01..MX-12) covers: per-product registration for all five products, duplicate-token refresh, the Firebase auth failure contract, admin-only broadcast protection, user opt-out enforcement, platform preference gates, invalid-token cleanup, ecosystem (`appId: "all-gogo"`, `targetType: "ecosystem"`) target selection, and retry/idempotency behavior. FCM multicast responses are MOCKED via the `GOGO_TEST_IMPORT`-guarded seam; live delivery verification is a manual post-deployment step (`docs/DEPLOYMENT.md`).
 
-
-## OpenAPI Description
-
-`GET /api/v1/openapi.json` serves an OpenAPI 3.1 document. Request-body
-schemas are generated from the live Zod validators via `z.toJSONSchema` at
-request time, so the document cannot drift from actual validation.
-Staleness is guarded by REG-21 in `tests/security-audit.test.ts`.
