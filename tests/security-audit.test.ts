@@ -653,6 +653,68 @@ async function runStandaloneSecurityAudit() {
       }
     }
 
+    // 19. [HIGH] Topic targeting is rejected at validation (never broadcast).
+    {
+      const resTopic = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: {
+          'X-GoGo-Sandbox-Role': 'admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          idempotencyKey: `idem_topic_reject_${Date.now()}`,
+          appId: 'pika-news',
+          targetType: 'topic',
+          targetValue: 'breaking-news',
+          platform: 'all',
+          title: 'Topic Send',
+          body: 'Must be rejected until topic delivery exists.',
+          deepLink: 'https://gogocompany.in/pikanews/',
+        }),
+      });
+      assert.equal(resTopic.status, 400, 'topic targetType must be rejected with HTTP 400');
+      const topicBody = (await resTopic.json()) as {
+        error?: string;
+        details?: Array<{ path?: string[]; message?: string }>;
+      };
+      // Version-safe: Zod 4 issues expose the offending path and accepted
+      // values, not always the rejected literal. Assert the 400 names the
+      // targetType field as the invalid input.
+      assert.ok(
+        Array.isArray(topicBody.details) &&
+          topicBody.details.some((issue) => (issue.path ?? []).includes('targetType')),
+        'validation details must flag the targetType field as invalid'
+      );
+
+      // Existing targeting modes keep working: broadcast is still accepted.
+      const resBroadcast = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: {
+          'X-GoGo-Sandbox-Role': 'admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          idempotencyKey: `idem_broadcast_ok_${Date.now()}`,
+          appId: 'pika-news',
+          targetType: 'broadcast',
+          targetValue: 'all',
+          platform: 'all',
+          title: 'Broadcast Still Works',
+          body: 'Existing targeting modes are unaffected by the topic rejection.',
+          deepLink: 'https://gogocompany.in/pikanews/',
+        }),
+      });
+      assert.equal(resBroadcast.status, 201, 'existing targeting modes must remain accepted');
+
+      results.push({
+        id: 'REG-19',
+        severity: 'HIGH',
+        name: 'Topic Targeting Rejected At Validation (No Silent Broadcast Fallback)',
+        passed: true,
+        detail: 'targetType "topic" returns HTTP 400 with validation details naming topic; broadcast targeting still returns 201 (existing modes unaffected).',
+      });
+    }
+
     // 17b. [HIGH] Failed-deliveries listing: admin-only, paginated, no token exposure.
     {
       const resUser = await fetch(`${baseUrl}/api/v1/notifications/failed-deliveries`, {

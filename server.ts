@@ -361,6 +361,11 @@ const SendNotificationSchema = z
   .object({
     idempotencyKey: z.string().min(6).max(128).regex(/^[a-zA-Z0-9_-]+$/),
     appId: z.string().min(2).max(64).regex(/^[a-z0-9-]+$/),
+    // `topic` is deliberately NOT an accepted value: FCM topic delivery is not
+    // implemented, and accepting it here would silently degrade a topic send
+    // into an app-wide broadcast (worker resolveCandidates treats unknown
+    // scopes as broadcast). Rejected at validation with HTTP 400 until genuine
+    // topic delivery exists.
     targetType: z.enum([
       'individual',
       'group',
@@ -368,7 +373,6 @@ const SendNotificationSchema = z
       'ecosystem',
       'broadcast',
       'targeted',
-      'topic',
     ]),
     targetValue: z.string().min(1).max(128),
     platform: z.enum(['all', 'web', 'android']).default('all'),
@@ -678,17 +682,24 @@ export async function createGoGoApp() {
     const isAdmin = req.user?.role === 'admin';
     const uid = req.user?.uid || '';
 
-    const products = await store().listApps();
-    const devices = isAdmin
-      ? await store().listDevices({})
-      : await store().listDevices({ userId: uid });
-    const preferences = isAdmin ? await store().listAllPreferences() : await store().listPreferences(uid);
-    const campaigns = isAdmin
-      ? await store().listCampaigns({})
-      : await store().listCampaigns({ visibleToUid: uid });
-    const deliveries = isAdmin
-      ? (await store().listDeliveries({ limit: 50 })).slice(0, 50)
-      : (await store().listDeliveries({ userId: uid, limit: 25 })).slice(0, 25);
+    // All store reads fan out in parallel; the response shape is identical
+    // to the previous sequential version (Phase 7 performance change).
+    const [
+      products, devices, preferences, campaigns, deliveries,
+      users, auditLogs, securityEvents, systemConfigs,
+    ] = await Promise.all([
+      store().listApps(),
+      isAdmin ? store().listDevices({}) : store().listDevices({ userId: uid }),
+      isAdmin ? store().listAllPreferences() : store().listPreferences(uid),
+      isAdmin ? store().listCampaigns({}) : store().listCampaigns({ visibleToUid: uid }),
+      isAdmin
+        ? store().listDeliveries({ limit: 50 }).then((d) => d.slice(0, 50))
+        : store().listDeliveries({ userId: uid, limit: 25 }).then((d) => d.slice(0, 25)),
+      isAdmin ? store().listUsers() : Promise.resolve([]),
+      isAdmin ? store().listAuditLogs(50) : Promise.resolve([]),
+      isAdmin ? store().listSecurityEvents(50) : Promise.resolve([]),
+      isAdmin ? store().listSystemConfigs() : Promise.resolve([]),
+    ]);
 
     res.json({
       currentUser: req.user,
@@ -697,14 +708,14 @@ export async function createGoGoApp() {
       // dry-run campaign can never be mistaken for a real broadcast.
       fcmDryRun: process.env.FCM_DRY_RUN === 'true',
       products,
-      users: isAdmin ? await store().listUsers() : [],
+      users,
       devices,
       preferences,
       campaigns,
       deliveries,
-      auditLogs: isAdmin ? await store().listAuditLogs(50) : [],
-      securityEvents: isAdmin ? await store().listSecurityEvents(50) : [],
-      systemConfigs: isAdmin ? await store().listSystemConfigs() : [],
+      auditLogs,
+      securityEvents,
+      systemConfigs,
     });
   });
 
