@@ -730,33 +730,6 @@ async function runStandaloneSecurityAudit() {
       });
     }
 
-    // 22. [MEDIUM] CSP is applied to SPA/dashboard responses only: present
-    // on the served frontend, absent on JSON API routes and on the
-    // Firebase auth proxy paths (upstream headers must pass through).
-    {
-      const resSpa = await fetch(`${baseUrl}/`);
-      const spaCsp = resSpa.headers.get('content-security-policy') || '';
-      assert.ok(
-        spaCsp.includes("default-src 'self'"),
-        `SPA CSP invalid (status=${resSpa.status}, csp=${JSON.stringify(spaCsp)}, headers=${JSON.stringify([...resSpa.headers.keys()])})`
-      );
-      assert.ok(spaCsp.includes("frame-ancestors 'none'"), `SPA CSP missing frame-ancestors (csp=${JSON.stringify(spaCsp)})`);
-
-      const resApi = await fetch(`${baseUrl}/api/v1/health`);
-      assert.equal(resApi.headers.get('content-security-policy'), null, 'JSON API responses must NOT carry a CSP header');
-
-      const resProxy = await fetch(`${baseUrl}/__/firebase/init.json`);
-      assert.notEqual(resProxy.status, 500);
-      assert.equal(resProxy.headers.get('content-security-policy'), null, 'Firebase auth proxy responses must NOT carry a CSP header');
-
-      results.push({
-        id: 'REG-22',
-        severity: 'MEDIUM',
-        name: 'CSP On Served SPA/Dashboard Responses Only (API & Firebase Proxy Untouched)',
-        passed: true,
-        detail: 'CSP with default-src self and frame-ancestors none is set on SPA responses; /api/v1/* JSON and /__/ Firebase proxy paths carry no CSP header.',
-      });
-    }
 
     // 18. [HIGH] Health probes are exempt from rate limiting (probe independence).
     // The limiter store is PostgreSQL-backed in production; if the probes were
@@ -797,6 +770,33 @@ async function runStandaloneSecurityAudit() {
       });
     }
 
+    // 22. [MEDIUM] CSP is applied to SPA/dashboard responses only: present
+    // on the served frontend, absent on JSON API routes and on the
+    // Firebase auth proxy paths (upstream headers must pass through).
+    {
+      const resSpa = await fetch(`${baseUrl}/`);
+      const spaCsp = resSpa.headers.get('content-security-policy') || '';
+      assert.ok(
+        spaCsp.includes("default-src 'self'"),
+        `SPA CSP invalid (status=${resSpa.status}, csp=${JSON.stringify(spaCsp)}, headers=${JSON.stringify([...resSpa.headers.keys()])})`
+      );
+      assert.ok(spaCsp.includes("frame-ancestors 'none'"), `SPA CSP missing frame-ancestors (csp=${JSON.stringify(spaCsp)})`);
+
+      const resApi = await fetch(`${baseUrl}/api/v1/health`);
+      assert.equal(resApi.headers.get('content-security-policy'), null, 'JSON API responses must NOT carry a CSP header');
+
+      const resProxy = await fetch(`${baseUrl}/__/firebase/init.json`);
+      assert.notEqual(resProxy.status, 500);
+      assert.equal(resProxy.headers.get('content-security-policy'), null, 'Firebase auth proxy responses must NOT carry a CSP header');
+
+      results.push({
+        id: 'REG-22',
+        severity: 'MEDIUM',
+        name: 'CSP On Served SPA/Dashboard Responses Only (API & Firebase Proxy Untouched)',
+        passed: true,
+        detail: 'CSP with default-src self and frame-ancestors none is set on SPA responses; /api/v1/* JSON and /__/ Firebase proxy paths carry no CSP header.',
+      });
+    }
     console.log(
       JSON.stringify(
         {
