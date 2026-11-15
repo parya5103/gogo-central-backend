@@ -715,6 +715,46 @@ async function runStandaloneSecurityAudit() {
       });
     }
 
+
+    // 18. [HIGH] Health probes are exempt from rate limiting (probe independence).
+    // The limiter store is PostgreSQL-backed in production; if the probes were
+    // rate-limited, a database outage would fail the limiter's increment and
+    // 500 even the process-only /health/live probe (restart-storm risk).
+    {
+      const probeBurst = 200; // more than the 180/min standard limit
+      let probeOk = true;
+      for (let i = 0; i < probeBurst; i += 1) {
+        const res = await fetch(`${baseUrl}/api/v1/health/live`);
+        if (res.status !== 200) {
+          probeOk = false;
+          break;
+        }
+      }
+      assert.ok(probeOk, 'all rapid /health/live requests must return 200 (probe exempt from the standard limiter)');
+
+      const resReady = await fetch(`${baseUrl}/api/v1/health/ready`);
+      const readyBody = (await resReady.json()) as { status?: string; database?: string };
+      assert.equal(resReady.status, 200);
+      assert.equal(readyBody.database, 'in-memory-test-mode');
+
+      // Control: a non-probe route on the same base URL is still rate-limited.
+      let saw429 = false;
+      for (let i = 0; i < 200 && !saw429; i += 1) {
+        const res = await fetch(`${baseUrl}/api/v1/overview`);
+        if (res.status === 429) saw429 = true;
+      }
+      assert.ok(saw429, 'standard limiter still enforces the limit on non-probe routes');
+
+      results.push({
+        id: 'REG-18',
+        severity: 'HIGH',
+        name: 'Health Probes Exempt From Rate Limiting (Liveness Stays DB-Independent)',
+        passed: true,
+        detail:
+          '200 rapid /health/live requests all return 200 and /health/ready answers directly; a control burst on /api/v1/overview still triggers the 429 limiter (probes exempt, everything else rate-limited).',
+      });
+    }
+
     // 20. [MEDIUM] Request ID middleware: x-request-id header + structured log.
     {
       const originalLog = console.log;
@@ -771,46 +811,6 @@ async function runStandaloneSecurityAudit() {
         detail: 'Responses carry x-request-id (UUID minted; valid client ids echoed; malformed ids replaced); structured JSON request log with method/path/status/durationMs/requestId and no sensitive fields.',
       });
     }
-
-    // 18. [HIGH] Health probes are exempt from rate limiting (probe independence).
-    // The limiter store is PostgreSQL-backed in production; if the probes were
-    // rate-limited, a database outage would fail the limiter's increment and
-    // 500 even the process-only /health/live probe (restart-storm risk).
-    {
-      const probeBurst = 200; // more than the 180/min standard limit
-      let probeOk = true;
-      for (let i = 0; i < probeBurst; i += 1) {
-        const res = await fetch(`${baseUrl}/api/v1/health/live`);
-        if (res.status !== 200) {
-          probeOk = false;
-          break;
-        }
-      }
-      assert.ok(probeOk, 'all rapid /health/live requests must return 200 (probe exempt from the standard limiter)');
-
-      const resReady = await fetch(`${baseUrl}/api/v1/health/ready`);
-      const readyBody = (await resReady.json()) as { status?: string; database?: string };
-      assert.equal(resReady.status, 200);
-      assert.equal(readyBody.database, 'in-memory-test-mode');
-
-      // Control: a non-probe route on the same base URL is still rate-limited.
-      let saw429 = false;
-      for (let i = 0; i < 200 && !saw429; i += 1) {
-        const res = await fetch(`${baseUrl}/api/v1/overview`);
-        if (res.status === 429) saw429 = true;
-      }
-      assert.ok(saw429, 'standard limiter still enforces the limit on non-probe routes');
-
-      results.push({
-        id: 'REG-18',
-        severity: 'HIGH',
-        name: 'Health Probes Exempt From Rate Limiting (Liveness Stays DB-Independent)',
-        passed: true,
-        detail:
-          '200 rapid /health/live requests all return 200 and /health/ready answers directly; a control burst on /api/v1/overview still triggers the 429 limiter (probes exempt, everything else rate-limited).',
-      });
-    }
-
     console.log(
       JSON.stringify(
         {
