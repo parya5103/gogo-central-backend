@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * GoGo Central Backend — Ecosystem Notification Matrix Tests (MX-01..MX-11)
+ * GoGo Central Backend — Ecosystem Notification Matrix Tests (MX-01..MX-12)
  *
  * End-to-end matrix for the five-product notification system:
  *   Tier A (HTTP, MX-01..MX-03): the real Express app on the in-memory test
@@ -201,6 +201,55 @@ async function tierAHttpTests(): Promise<void> {
         body: campaignPayload(`mx_http_admin_${Date.now()}`),
       });
       assertEqual(resAdmin.status, 201, 'admin can dispatch an ecosystem campaign');
+    });
+
+    await test('MX-12', 'HTTP: topic targeting explicitly rejected at validation (400), never silently broadcast', async () => {
+      const resTopic = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: { 'X-GoGo-Sandbox-Role': 'admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey: `mx_http_topic_${Date.now()}`,
+          appId: 'all-gogo',
+          targetType: 'topic',
+          targetValue: 'news-daily',
+          platform: 'all',
+          title: 'MX-12 topic probe',
+          body: 'must be rejected, never broadcast',
+          deepLink: DEEPLINK,
+          scheduledFor: null,
+        }),
+      });
+      // Rejected at schema validation: 400 with a Zod issue on the
+      // targetType field (version-safe assertion; Zod 4 issues expose the
+      // path and accepted values, not always the rejected literal).
+      const topicBody = (await resTopic.json()) as {
+        error?: string;
+        details?: Array<{ path?: string[]; message?: string }>;
+      };
+      assertEqual(resTopic.status, 400, 'topic targeting rejected with 400');
+      assert(
+        Array.isArray(topicBody.details) &&
+          topicBody.details.some((issue) => (issue.path ?? []).includes('targetType')),
+        'explicit topic rejection contract: validation issue on targetType'
+      );
+
+      // Existing targeting modes are unaffected by the topic guard.
+      const resProduct = await fetch(`${baseUrl}/api/v1/notifications/send`, {
+        method: 'POST',
+        headers: { 'X-GoGo-Sandbox-Role': 'admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey: `mx_http_prod_${Date.now()}`,
+          appId: 'pika-news',
+          targetType: 'product',
+          targetValue: 'all',
+          platform: 'all',
+          title: 'MX-12 product probe',
+          body: 'existing targeting modes still dispatch',
+          deepLink: DEEPLINK,
+          scheduledFor: null,
+        }),
+      });
+      assertEqual(resProduct.status, 201, 'non-topic targeting modes still dispatch (no regression)');
     });
   } finally {
     server.close();
