@@ -759,15 +759,10 @@ async function runStandaloneSecurityAudit() {
     // document must exactly match a freshly generated one.
     {
       // Unique X-Forwarded-For: REG-18's limiter burst above exhausts the shared
-      
-// in-memory bucket; a fresh client IP gives this request a clean rate-limit
-      
-// bucket instead of a 429 (same pattern as REG-23/REG-24 blocks).
-      
+      // in-memory bucket; a fresh client IP gives this request a clean rate-limit
+      // bucket instead of a 429 (same pattern as REG-23/REG-24 blocks).
       const res = await fetch(`${baseUrl}/api/v1/openapi.json`, {
-      
         headers: { 'X-Forwarded-For': '203.0.113.79' },
-      
       });
       assert.equal(res.status, 200);
       const served = (await res.json()) as Record<string, unknown>;
