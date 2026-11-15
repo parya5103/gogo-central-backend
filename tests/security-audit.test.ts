@@ -715,35 +715,6 @@ async function runStandaloneSecurityAudit() {
       });
     }
 
-    // 17b. [HIGH] Failed-deliveries listing: admin-only, paginated, no token exposure.
-    {
-      const resUser = await fetch(`${baseUrl}/api/v1/notifications/failed-deliveries`, {
-        headers: { 'X-GoGo-Sandbox-Role': 'user' },
-      });
-      assert.equal(resUser.status, 403, 'user role must get 403 on failed-deliveries');
-
-      const resAdmin = await fetch(`${baseUrl}/api/v1/notifications/failed-deliveries?limit=10&offset=0`, {
-        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
-      });
-      assert.equal(resAdmin.status, 200);
-      const body = (await resAdmin.json()) as { deliveries: Array<Record<string, unknown>>; count: number; total: number; limit: number; offset: number };
-      assert.ok(Array.isArray(body.deliveries));
-      assert.equal(typeof body.total, 'number');
-      assert.equal(body.limit, 10);
-      assert.equal(body.offset, 0);
-      for (const d of body.deliveries) {
-        assert.equal('fcmToken' in d, false, 'no FCM tokens in failed-deliveries listing');
-      }
-
-      results.push({
-        id: 'REG-24',
-        severity: 'HIGH',
-        name: 'Admin-Only Failed-Deliveries Listing (Paginated, No Token Exposure)',
-        passed: true,
-        detail:
-          'GET /api/v1/notifications/failed-deliveries: user role 403; admin 200 with {deliveries,count,total,limit,offset}; response carries no fcmToken fields.',
-      });
-    }
     // 18. [HIGH] Health probes are exempt from rate limiting (probe independence).
     // The limiter store is PostgreSQL-backed in production; if the probes were
     // rate-limited, a database outage would fail the limiter's increment and
@@ -783,6 +754,35 @@ async function runStandaloneSecurityAudit() {
       });
     }
 
+    // 17b. [HIGH] Failed-deliveries listing: admin-only, paginated, no token exposure.
+    {
+      const resUser = await fetch(`${baseUrl}/api/v1/notifications/failed-deliveries`, {
+        headers: { 'X-GoGo-Sandbox-Role': 'user' },
+      });
+      assert.equal(resUser.status, 403, 'user role must get 403 on failed-deliveries');
+
+      const resAdmin = await fetch(`${baseUrl}/api/v1/notifications/failed-deliveries?limit=10&offset=0`, {
+        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+      });
+      assert.equal(resAdmin.status, 200);
+      const body = (await resAdmin.json()) as { deliveries: Array<Record<string, unknown>>; count: number; total: number; limit: number; offset: number };
+      assert.ok(Array.isArray(body.deliveries));
+      assert.equal(typeof body.total, 'number');
+      assert.equal(body.limit, 10);
+      assert.equal(body.offset, 0);
+      for (const d of body.deliveries) {
+        assert.equal('fcmToken' in d, false, 'no FCM tokens in failed-deliveries listing');
+      }
+
+      results.push({
+        id: 'REG-24',
+        severity: 'HIGH',
+        name: 'Admin-Only Failed-Deliveries Listing (Paginated, No Token Exposure)',
+        passed: true,
+        detail:
+          'GET /api/v1/notifications/failed-deliveries: user role 403; admin 200 with {deliveries,count,total,limit,offset}; response carries no fcmToken fields.',
+      });
+    }
     console.log(
       JSON.stringify(
         {
