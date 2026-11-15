@@ -755,14 +755,16 @@ async function runStandaloneSecurityAudit() {
     }
 
     // 17b. [HIGH] Failed-deliveries listing: admin-only, paginated, no token exposure.
+    // Runs after REG-18's limiter-exhaustion burst, so both requests below use a
+    // distinct X-Forwarded-For client IP to get a fresh rate-limit bucket.
     {
       const resUser = await fetch(`${baseUrl}/api/v1/notifications/failed-deliveries`, {
-        headers: { 'X-GoGo-Sandbox-Role': 'user' },
+        headers: { 'X-GoGo-Sandbox-Role': 'user', 'X-Forwarded-For': '203.0.113.78' },
       });
       assert.equal(resUser.status, 403, 'user role must get 403 on failed-deliveries');
 
       const resAdmin = await fetch(`${baseUrl}/api/v1/notifications/failed-deliveries?limit=10&offset=0`, {
-        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+        headers: { 'X-GoGo-Sandbox-Role': 'admin', 'X-Forwarded-For': '203.0.113.78' },
       });
       assert.equal(resAdmin.status, 200);
       const body = (await resAdmin.json()) as { deliveries: Array<Record<string, unknown>>; count: number; total: number; limit: number; offset: number };
