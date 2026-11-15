@@ -755,6 +755,8 @@ async function runStandaloneSecurityAudit() {
     }
 
     // 18b. [HIGH] Campaign cancellation: admin-only, atomic, fail-closed.
+    // Runs after REG-18's limiter-exhaustion burst, so every request below
+    // uses a distinct X-Forwarded-For client IP to get a fresh rate-limit bucket.
     {
       const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       const resSend = await fetch(`${baseUrl}/api/v1/notifications/send`, {
@@ -762,6 +764,7 @@ async function runStandaloneSecurityAudit() {
         headers: {
           'X-GoGo-Sandbox-Role': 'admin',
           'Content-Type': 'application/json',
+          'X-Forwarded-For': '203.0.113.77',
         },
         body: JSON.stringify({
           idempotencyKey: `idem_cancel_${Date.now()}`,
@@ -783,14 +786,14 @@ async function runStandaloneSecurityAudit() {
       // Non-admin is rejected by RBAC.
       const resForbidden = await fetch(`${baseUrl}/api/v1/notifications/${notificationId}/cancel`, {
         method: 'POST',
-        headers: { 'X-GoGo-Sandbox-Role': 'user' },
+        headers: { 'X-GoGo-Sandbox-Role': 'user', 'X-Forwarded-For': '203.0.113.77' },
       });
       assert.equal(resForbidden.status, 403, 'user role must get 403 on cancel');
 
       // Admin cancels the scheduled campaign.
       const resCancel = await fetch(`${baseUrl}/api/v1/notifications/${notificationId}/cancel`, {
         method: 'POST',
-        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+        headers: { 'X-GoGo-Sandbox-Role': 'admin', 'X-Forwarded-For': '203.0.113.77' },
       });
       assert.equal(resCancel.status, 200);
       const cancelBody = (await resCancel.json()) as { campaign: { status: string } };
@@ -799,14 +802,14 @@ async function runStandaloneSecurityAudit() {
       // Cancelling again is a conflict (no longer cancellable).
       const resAgain = await fetch(`${baseUrl}/api/v1/notifications/${notificationId}/cancel`, {
         method: 'POST',
-        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+        headers: { 'X-GoGo-Sandbox-Role': 'admin', 'X-Forwarded-For': '203.0.113.77' },
       });
       assert.equal(resAgain.status, 409);
 
       // Unknown campaign id -> 404.
       const resMissing = await fetch(`${baseUrl}/api/v1/notifications/notif_does_not_exist/cancel`, {
         method: 'POST',
-        headers: { 'X-GoGo-Sandbox-Role': 'admin' },
+        headers: { 'X-GoGo-Sandbox-Role': 'admin', 'X-Forwarded-For': '203.0.113.77' },
       });
       assert.equal(resMissing.status, 404);
 
