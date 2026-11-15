@@ -1,0 +1,12 @@
+# Gitleaks configuration for gogo-central-backend.
+# Extends the default rule set. Firebase web API keys (AIza...) are public
+# client-side identifiers shipped inside the served SPA bundle, so they are
+# allowlisted below. Server-side credentials (service-account JSON,
+# DATABASE_URL, NEON_API_KEY, FCM tokens) remain covered by default rules.
+
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Firebase web API keys are public client-side identifiers"
+  regexes = ['''AIza[0-9A-Za-z\-_]{35}''']

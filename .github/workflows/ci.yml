@@ -51,6 +51,12 @@ jobs:
         # npm-lockfile job), so npm ci is the reproducible install path.
         run: set -o pipefail && npm ci --no-audit --no-fund 2>&1 | tee /tmp/install.log
 
+      - name: Dependency Audit (npm audit, report-only)
+        # Phase 3: report-only gate. Findings are printed but never fail
+        # the build yet; once current advisories are triaged, remove the
+        # `|| true` to make this a blocking gate.
+        run: npm audit --audit-level=high || true
+
       - name: Lint Firestore Zero-Trust Security Rules
         run: set -o pipefail && npx eslint firestore.rules 2>&1 | tee /tmp/eslint.log
 
@@ -392,3 +398,53 @@ jobs:
             git commit -m "chore: generate package-lock.json for reproducible npm ci (Node $(node --version), npm $(npm --version))"
             git push origin HEAD:${{ github.head_ref }}
           fi
+
+  # ---------------------------------------------------------------------------
+  # Phase 3: secret scanning. Gitleaks scans the full history for leaked
+  # credentials. Firebase web API keys (AIza...) are public client-side
+  # identifiers shipped in the served SPA bundle, so they are allowlisted
+  # in .gitleaks.toml; every other default rule (service-account JSON,
+  # database URLs, provider tokens) stays blocking.
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    name: Secret Scanning (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@3362625132cc7b8b75d6dfedef340a4569f8ee8b # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Diagnostic: post findings as a PR comment (Actions logs are not
+      # readable from mobile clients on private repositories).
+      - name: Report gitleaks findings to pull request
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const { readFileSync } = require("fs");
+            let out = "";
+            try {
+              out = execSync("gitleaks detect --source . --report-format json --report-path /tmp/gitleaks.json --redact -v 2>&1 || true", { encoding: "utf8" }).toString();
+            } catch (e) { out = String(e); }
+            let findings = "";
+            try {
+              const j = JSON.parse(readFileSync("/tmp/gitleaks.json", "utf8"));
+              findings = j.slice(0, 10).map((f) => "- " + f.RuleID + " @ " + f.File + ":" + f.StartLine + " (commit " + String(f.Commit).slice(0, 10) + ")").join(String.fromCharCode(10));
+            } catch {}
+            const body = "Gitleaks secret scan failed. Findings (redacted):" + String.fromCharCode(10) + (findings || out.slice(-2500));
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
