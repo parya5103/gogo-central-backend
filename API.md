@@ -139,6 +139,7 @@ Dispatches or schedules an FCM notification campaign with durable, database-back
   - `"group"` — Send to a selected user segment (`targetValue: "exam-aspirants" | "vip-gamers" | "breaking-news"`)
   - `"product"` — Broadcast to all opted-in users of `appId` (`targetValue: "all"`)
   - `"ecosystem"` — Broadcast announcement across **all GoGo products** (`appId: "all-gogo"`, `targetValue: "all"`)
+  - `"topic"` — **Not an accepted value.** Requests fail schema validation with `400 Invalid notification campaign payload` (Zod issue on `targetType`). Topic delivery is not implemented (no topic subscriptions exist); it is never silently converted into a broadcast. Defense-in-depth: the delivery worker also fails closed with `TOPIC_TARGETING_NOT_IMPLEMENTED` if a topic campaign ever reaches it.
 
 - **`200 OK` with `duplicatePrevented: true`** — the idempotency key was seen before with the same payload; the original campaign is returned and nothing is re-sent.
 - **`409 Conflict` (`IDEMPOTENCY_PAYLOAD_MISMATCH`)** — the idempotency key was reused with a different payload; nothing is dispatched.
@@ -184,7 +185,8 @@ New top-level field `fcmDryRun: boolean` — `true` when the server runs with `F
 `fcm_token` is globally unique. Re-registering the same token (web token refresh after a service-worker update, re-opt-in, or a returning device) now refreshes the existing row: `user_id`, `platform` and `user_agent` are updated, `status` returns to `active`, `last_refreshed_at` is bumped, and the original `device_id` is preserved (stable audit identity). It never creates a second row, so the same physical device cannot be targeted twice in one campaign. Previously this failed with HTTP 500 (unique-constraint violation).
 
 ### Notification matrix coverage
-`tests/notification-matrix.test.ts` (MX-01..MX-11) covers: per-product registration for all five products, duplicate-token refresh, the Firebase auth failure contract, admin-only broadcast protection, user opt-out enforcement, platform preference gates, invalid-token cleanup, ecosystem (`appId: "all-gogo"`, `targetType: "ecosystem"`) target selection, and retry/idempotency behavior. FCM multicast responses are MOCKED via the `GOGO_TEST_IMPORT`-guarded seam; live delivery verification is a manual post-deployment step (`docs/DEPLOYMENT.md`).
+`tests/notification-matrix.test.ts` (MX-01..MX-12) covers: per-product registration for all five products, duplicate-token refresh, the Firebase auth failure contract, admin-only broadcast protection, user opt-out enforcement, platform preference gates, invalid-token cleanup, ecosystem (`appId: "all-gogo"`, `targetType: "ecosystem"`) target selection, and retry/idempotency behavior. FCM multicast responses are MOCKED via the `GOGO_TEST_IMPORT`-guarded seam; live delivery verification is a manual post-deployment step (`docs/DEPLOYMENT.md`).
+
 
 ## OpenAPI Description
 
