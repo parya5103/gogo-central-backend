@@ -305,8 +305,8 @@ export class NotificationWorker {
               notification: {
                 title: campaign.title,
                 body: campaign.body,
-                icon: 'https://gogocompany.in/favicon.ico',
-                badge: 'https://gogocompany.in/favicon.ico',
+                icon: 'https://gogocompany.in/favicon.svg',
+                badge: 'https://gogocompany.in/favicon.svg',
                 tag: campaign.idempotencyKey,
                 renotify: true,
                 requireInteraction: true,
@@ -435,8 +435,8 @@ export class NotificationWorker {
               notification: {
                 title: campaign.title,
                 body: campaign.body,
-                icon: 'https://gogocompany.in/favicon.ico',
-                badge: 'https://gogocompany.in/favicon.ico',
+                icon: 'https://gogocompany.in/favicon.svg',
+                badge: 'https://gogocompany.in/favicon.svg',
                 tag: campaign.idempotencyKey,
                 renotify: true,
                 requireInteraction: true,
