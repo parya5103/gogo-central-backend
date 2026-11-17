@@ -64,7 +64,7 @@ import {
 /**
  * Marks FCM message IDs produced under FCM_DRY_RUN=true so a validation-only
  * receipt can never be mistaken for a real delivered push (mirrors the
- * `simulated:` convention used for demo tokens). Capped to the VARCHAR(128)
+ * dry-run convention used for validation-only requests). Capped to VARCHAR(128)
  * fcm_message_id column.
  */
 function markDryRunMessageId(messageId: string | null): string | null {
