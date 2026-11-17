@@ -212,18 +212,23 @@ export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>
     liveProbeErrorCode = typeof err.code === 'string' ? err.code : 'unknown-error-code';
   }
 
+  const credentialProjectId = serviceAccountResolution.projectId ||
+    (inlineServiceAccountConfigured ? configuredProjectId : null);
   return {
     adminAppInitialized: getApps().length > 0,
+    firebaseAdminConfigured: FIREBASE_ADMIN_CONFIGURED,
     credentialsEnvSet: Boolean(
       process.env.GOOGLE_APPLICATION_CREDENTIALS ||
       process.env.FIREBASE_SERVICE_ACCOUNT_FILE ||
-      process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+      process.env.FIREBASE_SERVICE_ACCOUNT_JSON ||
+      inlineServiceAccountConfigured
     ),
-    credentialFileState: serviceAccountResolution.state,
-    credentialProjectId: serviceAccountResolution.projectId,
-    credentialSource: serviceAccountResolution.account?.source || 'application-default',
-    expectedProjectId: firebaseConfig.projectId,
-    projectIdMatches: serviceAccountResolution.projectId === firebaseConfig.projectId,
+    credentialFileState: inlineServiceAccountConfigured ? 'inline-env' : serviceAccountResolution.state,
+    credentialProjectId,
+    credentialSource: serviceAccountResolution.account?.source ||
+      (inlineServiceAccountConfigured ? 'inline-env' : 'application-default'),
+    expectedProjectId: configuredProjectId,
+    projectIdMatches: credentialProjectId === configuredProjectId,
     liveProbeErrorCode,
     fcmDryRun: process.env.FCM_DRY_RUN === 'true',
   };
