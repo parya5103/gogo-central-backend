@@ -27,27 +27,48 @@ const firebaseServiceAccountJson =
   (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim().startsWith('{')
     ? process.env.GOOGLE_APPLICATION_CREDENTIALS
     : '');
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID || firebaseConfig.projectId;
+const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL || '';
+const firebasePrivateKey = (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+const hasInlineServiceAccount = Boolean(firebaseClientEmail && firebasePrivateKey);
+const hasCredentialFile = Boolean(
+  process.env.GOOGLE_APPLICATION_CREDENTIALS &&
+  !process.env.GOOGLE_APPLICATION_CREDENTIALS.trim().startsWith('{')
+);
+export const FIREBASE_ADMIN_CONFIGURED = Boolean(firebaseServiceAccountJson || hasInlineServiceAccount || hasCredentialFile);
+
+if (firebaseProjectId !== firebaseConfig.projectId) {
+  throw new Error('FIREBASE_SERVICE_ACCOUNT_PROJECT_MISMATCH');
+}
 
 if (!getApps().length) {
   if (firebaseServiceAccountJson) {
     const serviceAccount = parseFirebaseServiceAccount(firebaseServiceAccountJson);
-    if (serviceAccount.project_id !== firebaseConfig.projectId) {
+    if (serviceAccount.project_id !== firebaseProjectId) {
       throw new Error('FIREBASE_SERVICE_ACCOUNT_PROJECT_MISMATCH');
     }
     initializeApp({
       credential: cert(serviceAccount as Parameters<typeof cert>[0]),
-      projectId: firebaseConfig.projectId,
+      projectId: firebaseProjectId,
+    });
+  } else if (hasInlineServiceAccount) {
+    initializeApp({
+      credential: cert({
+        projectId: firebaseProjectId,
+        clientEmail: firebaseClientEmail,
+        privateKey: firebasePrivateKey,
+      }),
+      projectId: firebaseProjectId,
     });
   } else {
     // Supports Render Secret Files and Google Application Default Credentials.
-    // When GOOGLE_APPLICATION_CREDENTIALS is a file path, the Admin SDK reads it.
-    initializeApp({ projectId: firebaseConfig.projectId });
+    initializeApp({ projectId: firebaseProjectId });
   }
 }
 
 export const adminAuth = getAuth();
 export const adminMessaging = getMessaging();
-export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
+export const FIREBASE_PROJECT_ID = firebaseProjectId;
 export const ROOT_ADMIN_EMAIL = 'aaryapratik@gmail.com';
 
 /**
