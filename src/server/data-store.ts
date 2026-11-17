@@ -69,6 +69,8 @@ export interface GoGoDataStore {
     authProvider: 'google.com' | 'password' | 'anonymous_guest';
     role: 'user' | 'admin';
   }): Promise<void>;
+  /** Ensure the fixed, least-privilege principal used by trusted publishing automation exists in the active persistence mode. */
+  ensureGitHubActionsPrincipal(): Promise<void>;
   listUsers(): Promise<CentralUserRecord[]>;
 
   // Registered applications

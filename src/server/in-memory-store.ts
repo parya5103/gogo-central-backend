@@ -72,6 +72,25 @@ export class InMemoryDataStore implements GoGoDataStore {
     });
   }
 
+  async ensureGitHubActionsPrincipal(): Promise<void> {
+    const uid = 'system:github-actions';
+    const now = new Date().toISOString();
+    const existing = this.engine.users.get(uid);
+    this.engine.users.set(uid, {
+      uid,
+      displayName: 'GitHub Actions automation',
+      emailMasked: 'automation@system.invalid',
+      role: 'user',
+      emailVerified: false,
+      connectedApps: ['gogocompany-in'],
+      authProvider: 'anonymous_guest',
+      firestoreGameSavePreserved: true,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    });
+    this.engine.admins.delete(uid);
+  }
+
   async listUsers(): Promise<CentralUserRecord[]> {
     return Array.from(this.engine.users.values());
   }

@@ -1025,6 +1025,27 @@ async function main(): Promise<void> {
     }
   });
 
+  await test('PGT-24', 'GitHub Actions automation principal can author product-update campaigns without admin privileges', async () => {
+    await store.ensureGitHubActionsPrincipal();
+    const automationUser = await getUser('system:github-actions');
+    assert(automationUser !== null, 'automation principal persisted');
+    assertEqual(automationUser!.role, 'user', 'automation principal is never an admin');
+    const result = await store.dispatchNotification({
+      idempotencyKey: `${RUN}_gha_author`,
+      appId: 'gogocompany-in',
+      targetType: 'product',
+      targetValue: 'all',
+      platform: 'all',
+      title: 'GoGo Company update',
+      body: 'Automated publication event test',
+      deepLink: 'https://gogocompany.in/',
+      scheduledFor: null,
+      authorId: 'system:github-actions',
+    });
+    assert(result.campaign !== null, 'automation campaign is created');
+    assertEqual(result.campaign.authorId, 'system:github-actions', 'campaign stores the service principal as author');
+  });
+
   await store.close();
 
   const failed = results.filter((r) => r.status === 'FAIL');

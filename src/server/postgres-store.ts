@@ -40,6 +40,7 @@ import {
   isAdminUid,
   hasUser,
   upsertUserFromFirebase,
+  ensureGitHubActionsServiceUser,
   listUsers,
   countUsers,
 } from '../repositories/users.repository.ts';
@@ -123,6 +124,10 @@ export class PostgresDataStore implements GoGoDataStore {
     }
   ): Promise<void> {
     await upsertUserFromFirebase({ uid, ...profile });
+  }
+
+  async ensureGitHubActionsPrincipal(): Promise<void> {
+    await ensureGitHubActionsServiceUser();
   }
 
   async listUsers(): Promise<CentralUserRecord[]> {

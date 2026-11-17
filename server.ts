@@ -1157,10 +1157,11 @@ export async function createGoGoApp() {
     const idempotencyKey = 'gha_' + createHash('sha256')
       .update(`${claims.repository}|${eventType}|${eventId}`).digest('hex');
     try {
+      await store().ensureGitHubActionsPrincipal();
       const result = await store().dispatchNotification({
         idempotencyKey, appId: rule.appId, targetType: 'product', targetValue: 'all',
         platform: 'all', title, body, deepLink, scheduledFor: null,
-        authorId: `github-actions:${claims.repository}`,
+        authorId: 'system:github-actions',
       });
       return res.status(result.duplicatePrevented ? 200 : 201).json({
         accepted: true, duplicatePrevented: result.duplicatePrevented,
