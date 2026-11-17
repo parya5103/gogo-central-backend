@@ -28,7 +28,7 @@ import {
 import { PostgresRateLimitStore } from './src/server/rate-limit-pg.ts';
 import { mapFirebaseSignInProvider } from './src/server/auth-provider.ts';
 import { createHash } from 'node:crypto';
-import { verifyGitHubActionsOidcToken } from './src/server/github-actions-oidc.ts';
+import { verifyGitHubActionsOidcToken, type GitHubActionsClaims } from './src/server/github-actions-oidc.ts';
 import { pruneNonFcmDeviceTokens } from './src/repositories/devices.repository.ts';
 import {
   resolvePostgresConfig,
@@ -1092,7 +1092,7 @@ export async function createGoGoApp() {
     const match = authorization.match(/^Bearer ([^\s]+)$/);
     if (!match) return res.status(401).json({ error: 'GitHub Actions OIDC token required.' });
 
-    let claims;
+    let claims: GitHubActionsClaims;
     try {
       claims = await verifyGitHubActionsOidcToken(match[1], 'gogo-central-notifications');
     } catch {
@@ -1144,10 +1144,10 @@ export async function createGoGoApp() {
     }
     try {
       const link = new URL(deepLink);
-      const expectedPath = {
+      const expectedPath = ({
         'sarkari-sarthi': '/sarkari-sarthi/', 'pika-news': '/pikanews/',
         'arrow-out': '/arrowout/', 'crystal-quest': '/crystalquest/', 'gogocompany-in': '/',
-      }[rule.appId];
+      } as Record<string, string>)[rule.appId];
       if (link.protocol !== 'https:' || link.hostname !== 'gogocompany.in' ||
           !link.pathname.startsWith(expectedPath)) throw new Error('INVALID_PRODUCT_DEEP_LINK');
     } catch {
