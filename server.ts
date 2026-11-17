@@ -1102,21 +1102,31 @@ export async function createGoGoApp() {
       return res.status(401).json({ error: 'GitHub Actions identity verification failed.' });
     }
 
-    const sourceRules: Record<string, { appId: string; paths: string[]; events: string[]; release?: boolean }> = {
-      'parya5103/Sarkari-Sarthi': { appId: 'sarkari-sarthi', paths: ['.github/workflows/daily-job-fetch-deploy.yml'], events: ['new_jobs', 'new_admit_card', 'new_result'] },
-      'parya5103/PikaNews': { appId: 'pika-news', paths: ['.github/workflows/news_collector.yml'], events: ['important_news'] },
-      'parya5103/gogo-website': { appId: 'gogocompany-in', paths: ['.github/workflows/sync-products.yml'], events: ['product_update'] },
-      'parya5103/Fletch_Game': { appId: 'arrow-out', paths: ['.github/workflows/release-notify.yml'], events: ['product_release'], release: true },
-      'parya5103/crystal-quest-web': { appId: 'crystal-quest', paths: ['.github/workflows/release-notify.yml'], events: ['product_release'], release: true },
+    const sourceRules: Record<string, Array<{ appId: string; path: string; events: string[]; release?: boolean }>> = {
+      'parya5103/Sarkari-Sarthi': [
+        { appId: 'sarkari-sarthi', path: '.github/workflows/daily-job-fetch-deploy.yml', events: ['new_jobs', 'new_admit_card', 'new_result'] },
+      ],
+      'parya5103/gogo-website': [
+        { appId: 'gogocompany-in', path: '.github/workflows/sync-products.yml', events: ['product_update'] },
+        { appId: 'pika-news', path: '.github/workflows/sync-pikanews.yml', events: ['important_news'] },
+      ],
+      'parya5103/Fletch_Game': [
+        { appId: 'arrow-out', path: '.github/workflows/release-notify.yml', events: ['product_release'], release: true },
+      ],
+      'parya5103/crystal-quest-web': [
+        { appId: 'crystal-quest', path: '.github/workflows/release-notify.yml', events: ['product_release'], release: true },
+      ],
     };
-    const rule = sourceRules[claims.repository];
-    const workflowAllowed = rule?.paths.some((path) => claims.workflow_ref.startsWith(`${claims.repository}/${path}@`)) ?? false;
+    const repoRules = sourceRules[claims.repository] || [];
+    const eventType = String(req.body?.eventType || '');
+    const rule = repoRules.find((candidate) =>
+      claims.workflow_ref.startsWith(`${claims.repository}/${candidate.path}@`) &&
+      candidate.events.includes(eventType)
+    );
     const validRef = rule?.release
-      ? /^refs\/tags\/[A-Za-z0-9._-]{1,80}$/.test(claims.ref)
+      ? /^refs\\/tags\\/[A-Za-z0-9._-]{1,80}$/.test(claims.ref)
       : claims.ref === 'refs/heads/main';
-    if (!rule || !validRef || !workflowAllowed ||
-        !claims.workflow_ref.endsWith(claims.ref) ||
-        !rule.events.includes(String(req.body?.eventType || ''))) {
+    if (!rule || !validRef || !claims.workflow_ref.endsWith(claims.ref)) {
       await store().recordSecurityEvent('RBAC_VIOLATION', rule?.appId || 'central-control',
         'POST /api/v1/automation/publish', 'high',
         `Blocked non-allowlisted publishing identity or event from ${String(claims.repository).slice(0, 120)}.`,
@@ -1145,7 +1155,7 @@ export async function createGoGoApp() {
     }
 
     const idempotencyKey = 'gha_' + createHash('sha256')
-      .update(`${claims.repository}|${req.body.eventType}|${eventId}`).digest('hex');
+      .update(`${claims.repository}|${eventType}|${eventId}`).digest('hex');
     try {
       const result = await store().dispatchNotification({
         idempotencyKey, appId: rule.appId, targetType: 'product', targetValue: 'all',
