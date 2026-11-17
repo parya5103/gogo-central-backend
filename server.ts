@@ -30,7 +30,6 @@ import { mapFirebaseSignInProvider } from './src/server/auth-provider.ts';
 import { createHash } from 'node:crypto';
 import { verifyGitHubActionsOidcToken, type GitHubActionsClaims } from './src/server/github-actions-oidc.ts';
 import { pruneNonFcmDeviceTokens } from './src/repositories/devices.repository.ts';
-import { ensureGitHubActionsServiceUser } from './src/repositories/users.repository.ts';
 import {
   resolvePostgresConfig,
   verifyPostgresMigrationFile,
@@ -1158,7 +1157,7 @@ export async function createGoGoApp() {
     const idempotencyKey = 'gha_' + createHash('sha256')
       .update(`${claims.repository}|${eventType}|${eventId}`).digest('hex');
     try {
-      await ensureGitHubActionsServiceUser();
+      await store().ensureGitHubActionsPrincipal();
       const result = await store().dispatchNotification({
         idempotencyKey, appId: rule.appId, targetType: 'product', targetValue: 'all',
         platform: 'all', title, body, deepLink, scheduledFor: null,
