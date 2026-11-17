@@ -321,13 +321,13 @@ export class NotificationWorker {
           const dev = chunk[idx];
           const resp = response.responses[idx];
           if (resp.success) {
-            const messageId = markDryRunMessageId(resp.messageId ?? null);
+            const rawMessageId = resp.messageId ?? null;
             console.info('[FCM] Message accepted by Firebase:', {
               notificationId: campaign.notificationId,
               deviceId: dev.deviceId,
-              messageId,
+              messageId: rawMessageId,
             });
-            await recordReceipt(dev, 'delivered', null, messageId, null);
+            await recordReceipt(dev, 'delivered', null, markDryRunMessageId(rawMessageId), null);
           } else {
             const errorCode = extractFcmErrorCode(resp.error);
             const errorClass = classifyFcmError(errorCode);
