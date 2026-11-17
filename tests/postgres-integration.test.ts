@@ -23,7 +23,7 @@ import {
   closePool,
   mapPgError,
 } from '../src/db/pool.ts';
-import { upsertUserFromFirebase, getUser, hasUser, recordUserAppAccess, setUserTimezone } from '../src/repositories/users.repository.ts';
+import { upsertUserFromFirebase, getUser, hasUser, recordUserAppAccess, setUserTimezone, ensureGitHubActionsServiceUser } from '../src/repositories/users.repository.ts';
 import { createDevice, getDevice } from '../src/repositories/devices.repository.ts';
 import { upsertPreference, getPreference, listPreferences } from '../src/repositories/preferences.repository.ts';
 import {
@@ -1023,6 +1023,27 @@ async function main(): Promise<void> {
       if (savedDryRun === undefined) delete process.env.FCM_DRY_RUN;
       else process.env.FCM_DRY_RUN = savedDryRun;
     }
+  });
+
+  await test('PGT-24', 'GitHub Actions automation principal can author product-update campaigns without admin privileges', async () => {
+    await ensureGitHubActionsServiceUser();
+    const automationUser = await getUser('system:github-actions');
+    assert(automationUser !== null, 'automation principal persisted');
+    assertEqual(automationUser!.role, 'user', 'automation principal is never an admin');
+    const result = await store.dispatchNotification({
+      idempotencyKey: `${RUN}_gha_author`,
+      appId: 'gogocompany-in',
+      targetType: 'product',
+      targetValue: 'all',
+      platform: 'all',
+      title: 'GoGo Company update',
+      body: 'Automated publication event test',
+      deepLink: 'https://gogocompany.in/',
+      scheduledFor: null,
+      authorId: 'system:github-actions',
+    });
+    assert(result.campaign !== null, 'automation campaign is created');
+    assertEqual(result.campaign.authorId, 'system:github-actions', 'campaign stores the service principal as author');
   });
 
   await store.close();
