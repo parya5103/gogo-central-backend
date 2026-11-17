@@ -41,6 +41,17 @@ function toRecord(row: DeviceRow): DeviceTokenRecord {
 const SELECT_DEVICES = `SELECT device_id, user_id, app_id, fcm_token, platform, user_agent,
   status, last_refreshed_at, created_at, updated_at FROM device_tokens`;
 
+/** Delete demo tokens and serialized PushSubscription blobs; neither is an FCM token. */
+export async function pruneNonFcmDeviceTokens(): Promise<number> {
+  const rows = await query<{ device_id: string }>(
+    `DELETE FROM device_tokens
+     WHERE left(fcm_token, 4) = 'fcm_'
+        OR left(ltrim(fcm_token), 1) IN ('{', '[')
+     RETURNING device_id`
+  );
+  return rows.length;
+}
+
 export async function getDevice(deviceId: string): Promise<DeviceTokenRecord | null> {
   const rows = await query<DeviceRow>(`${SELECT_DEVICES} WHERE device_id = $1`, [deviceId]);
   return rows[0] ? toRecord(rows[0]) : null;
