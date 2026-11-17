@@ -27,6 +27,7 @@ import {
 } from './src/server/data-store.ts';
 import { PostgresRateLimitStore } from './src/server/rate-limit-pg.ts';
 import { mapFirebaseSignInProvider } from './src/server/auth-provider.ts';
+import { pruneNonFcmDeviceTokens } from './src/repositories/devices.repository.ts';
 import {
   resolvePostgresConfig,
   verifyPostgresMigrationFile,
@@ -524,6 +525,12 @@ export async function createGoGoApp() {
   // for the request handlers. Startup fails loudly here if PostgreSQL is
   // required and unreachable (no silent in-memory fallback).
   activeStore = await resolveDataStore();
+  if (process.env.NODE_ENV === 'production' && process.env.FCM_DRY_RUN !== 'true') {
+    const prunedTokens = await pruneNonFcmDeviceTokens();
+    if (prunedTokens > 0) {
+      console.warn('[FCM] Startup cleanup removed non-FCM device tokens:', prunedTokens);
+    }
+  }
   const app = express();
 
   // Trust exactly 1 reverse proxy hop (Google Cloud Run GFE load balancer).
