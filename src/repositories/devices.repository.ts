@@ -47,6 +47,7 @@ export async function pruneNonFcmDeviceTokens(): Promise<number> {
     `DELETE FROM device_tokens
      WHERE left(fcm_token, 4) = 'fcm_'
         OR left(ltrim(fcm_token), 1) IN ('{', '[')
+        OR length(fcm_token) <= 100
      RETURNING device_id`
   );
   return rows.length;
