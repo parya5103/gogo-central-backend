@@ -45,7 +45,7 @@ function parseServiceAccount(raw: string): Omit<ResolvedServiceAccount, 'source'
       typeof value.private_key !== 'string' ||
       !value.private_key.includes('PRIVATE KEY')
     ) return null;
-    return { projectId: value.project_id, clientEmail: value.client_email, privateKey: value.private_key };
+    return { projectId: value.project_id, clientEmail: value.client_email, privateKey: value.private_key.replace(/\\n/g, '\n') };
   } catch {
     return null;
   }
@@ -101,23 +101,40 @@ function resolveServiceAccount(): {
 }
 
 const serviceAccountResolution = resolveServiceAccount();
+const configuredProjectId = process.env.FIREBASE_PROJECT_ID || firebaseConfig.projectId;
+const inlineClientEmail = process.env.FIREBASE_CLIENT_EMAIL || '';
+const inlinePrivateKey = (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+const inlineServiceAccountConfigured = Boolean(inlineClientEmail && inlinePrivateKey);
+
+if (configuredProjectId !== firebaseConfig.projectId) {
+  throw new Error('FIREBASE_SERVICE_ACCOUNT_PROJECT_MISMATCH');
+}
+export const FIREBASE_ADMIN_CONFIGURED = Boolean(
+  serviceAccountResolution.account || inlineServiceAccountConfigured
+);
 
 if (!getApps().length) {
   initializeApp({
-    projectId: firebaseConfig.projectId,
+    projectId: configuredProjectId,
     credential: serviceAccountResolution.account
       ? cert({
           projectId: serviceAccountResolution.account.projectId,
           clientEmail: serviceAccountResolution.account.clientEmail,
           privateKey: serviceAccountResolution.account.privateKey,
         })
-      : applicationDefault(),
+      : inlineServiceAccountConfigured
+        ? cert({
+            projectId: configuredProjectId,
+            clientEmail: inlineClientEmail,
+            privateKey: inlinePrivateKey,
+          })
+        : applicationDefault(),
   });
 }
 
 export const adminAuth = getAuth();
 export const adminMessaging = getMessaging();
-export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
+export const FIREBASE_PROJECT_ID = configuredProjectId;
 export const ROOT_ADMIN_EMAIL = 'aaryapratik@gmail.com';
 
 /**
@@ -195,18 +212,23 @@ export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>
     liveProbeErrorCode = typeof err.code === 'string' ? err.code : 'unknown-error-code';
   }
 
+  const credentialProjectId = serviceAccountResolution.projectId ||
+    (inlineServiceAccountConfigured ? configuredProjectId : null);
   return {
     adminAppInitialized: getApps().length > 0,
+    firebaseAdminConfigured: FIREBASE_ADMIN_CONFIGURED,
     credentialsEnvSet: Boolean(
       process.env.GOOGLE_APPLICATION_CREDENTIALS ||
       process.env.FIREBASE_SERVICE_ACCOUNT_FILE ||
-      process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+      process.env.FIREBASE_SERVICE_ACCOUNT_JSON ||
+      inlineServiceAccountConfigured
     ),
-    credentialFileState: serviceAccountResolution.state,
-    credentialProjectId: serviceAccountResolution.projectId,
-    credentialSource: serviceAccountResolution.account?.source || 'application-default',
-    expectedProjectId: firebaseConfig.projectId,
-    projectIdMatches: serviceAccountResolution.projectId === firebaseConfig.projectId,
+    credentialFileState: inlineServiceAccountConfigured ? 'inline-env' : serviceAccountResolution.state,
+    credentialProjectId,
+    credentialSource: serviceAccountResolution.account?.source ||
+      (inlineServiceAccountConfigured ? 'inline-env' : 'application-default'),
+    expectedProjectId: configuredProjectId,
+    projectIdMatches: credentialProjectId === configuredProjectId,
     liveProbeErrorCode,
     fcmDryRun: process.env.FCM_DRY_RUN === 'true',
   };
