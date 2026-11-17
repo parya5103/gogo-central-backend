@@ -627,9 +627,16 @@ async function main(): Promise<void> {
       deviceId: `${RUN}_dev_tz`,
       userId: uid,
       appId,
-      fcmToken: 'fcm_ci_demo_tz',
+      fcmToken: `${RUN}_real_fcm_registration_token_${'x'.repeat(120)}`,
       platform: 'android',
       userAgent: 'pgt-agent',
+    });
+    // MOCKED FCM: the timezone assertion must test quiet-hours logic, not a
+    // demo-token shortcut. A successful receipt here is explicitly test-only.
+    setTestFirebaseOverrides({
+      sendEachForMulticast: async () => ({
+        responses: [{ success: true, messageId: 'projects/test/messages/PGT15_KOLKATA' }],
+      }),
     });
     const kiriHour = hourIn('Pacific/Kiritimati'); // UTC+14
     const kolkataHour = hourIn('Asia/Kolkata'); // UTC+5:30 — never equal to kiriHour
@@ -683,6 +690,7 @@ async function main(): Promise<void> {
       'same window is not quiet hours in Kolkata — UTC is never silently assumed'
     );
     assertEqual(isInQuietHours(new Date(), '23:00', '01:00', null), false, 'null timezone → no enforcement (documented)');
+    setTestFirebaseOverrides({});
   });
 
   await test('PGT-16', 'SQL injection payloads are stored as data, never executed', async () => {
