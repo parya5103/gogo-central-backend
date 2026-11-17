@@ -27,6 +27,8 @@ import {
 } from './src/server/data-store.ts';
 import { PostgresRateLimitStore } from './src/server/rate-limit-pg.ts';
 import { mapFirebaseSignInProvider } from './src/server/auth-provider.ts';
+import { createHash } from 'node:crypto';
+import { verifyGitHubActionsOidcToken } from './src/server/github-actions-oidc.ts';
 import { pruneNonFcmDeviceTokens } from './src/repositories/devices.repository.ts';
 import {
   resolvePostgresConfig,
@@ -1083,6 +1085,86 @@ export async function createGoGoApp() {
     }
   );
 
+  // Trusted GitHub Actions publishing events. Tokens are verified against GitHub's
+  // signing keys, audience, repository, workflow path and protected ref before dispatch.
+  app.post('/api/v1/automation/publish', sensitiveMutationLimiter, async (req: Request, res: Response) => {
+    const authorization = req.headers.authorization || '';
+    const match = authorization.match(/^Bearer ([^\s]+)$/);
+    if (!match) return res.status(401).json({ error: 'GitHub Actions OIDC token required.' });
+
+    let claims;
+    try {
+      claims = await verifyGitHubActionsOidcToken(match[1], 'gogo-central-notifications');
+    } catch {
+      await store().recordSecurityEvent('UNVERIFIED_TOKEN_BLOCKED', 'central-control',
+        'POST /api/v1/automation/publish', 'high',
+        'Rejected invalid GitHub Actions OIDC token.', extractTrustedClientIp(req));
+      return res.status(401).json({ error: 'GitHub Actions identity verification failed.' });
+    }
+
+    const sourceRules: Record<string, { appId: string; path: string; events: string[]; release?: boolean }> = {
+      'parya5103/Sarkari-Sarthi': { appId: 'sarkari-sarthi', path: '.github/workflows/daily-job-fetch-deploy.yml', events: ['new_jobs', 'new_admit_card', 'new_result'] },
+      'parya5103/PikaNews': { appId: 'pika-news', path: '.github/workflows/news_collector.yml', events: ['important_news'] },
+      'parya5103/gogo-website': { appId: 'gogocompany-in', path: '.github/workflows/sync-products.yml', events: ['product_update'] },
+      'parya5103/Fletch_Game': { appId: 'arrow-out', path: '.github/workflows/release-notify.yml', events: ['product_release'], release: true },
+      'parya5103/crystal-quest-web': { appId: 'crystal-quest', path: '.github/workflows/release-notify.yml', events: ['product_release'], release: true },
+    };
+    const rule = sourceRules[claims.repository];
+    const expectedWorkflow = rule ? `${claims.repository}/${rule.path}@` : '';
+    const validRef = rule?.release
+      ? /^refs\/tags\/[A-Za-z0-9._-]{1,80}$/.test(claims.ref)
+      : claims.ref === 'refs/heads/main';
+    if (!rule || !validRef || !claims.workflow_ref.startsWith(expectedWorkflow) ||
+        !claims.workflow_ref.endsWith(claims.ref) ||
+        !rule.events.includes(String(req.body?.eventType || ''))) {
+      await store().recordSecurityEvent('RBAC_VIOLATION', rule?.appId || 'central-control',
+        'POST /api/v1/automation/publish', 'high',
+        `Blocked non-allowlisted publishing identity or event from ${String(claims.repository).slice(0, 120)}.`,
+        extractTrustedClientIp(req));
+      return res.status(403).json({ error: 'Repository, workflow, ref or event is not allowlisted.' });
+    }
+
+    const eventId = typeof req.body?.eventId === 'string' ? req.body.eventId.trim() : '';
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+    const deepLink = typeof req.body?.deepLink === 'string' ? req.body.deepLink.trim() : '';
+    if (!/^[A-Za-z0-9._:-]{1,160}$/.test(eventId) ||
+        title.length < 2 || title.length > 120 || body.length < 2 || body.length > 500) {
+      return res.status(400).json({ error: 'Invalid publishing event payload.' });
+    }
+    try {
+      const link = new URL(deepLink);
+      const expectedPath = {
+        'sarkari-sarthi': '/sarkari-sarthi/', 'pika-news': '/pikanews/',
+        'arrow-out': '/arrowout/', 'crystal-quest': '/crystalquest/', 'gogocompany-in': '/',
+      }[rule.appId];
+      if (link.protocol !== 'https:' || link.hostname !== 'gogocompany.in' ||
+          !link.pathname.startsWith(expectedPath)) throw new Error('INVALID_PRODUCT_DEEP_LINK');
+    } catch {
+      return res.status(400).json({ error: 'Deep link must point to the matching GoGo product path.' });
+    }
+
+    const idempotencyKey = 'gha_' + createHash('sha256')
+      .update(`${claims.repository}|${req.body.eventType}|${eventId}`).digest('hex');
+    try {
+      const result = await store().dispatchNotification({
+        idempotencyKey, appId: rule.appId, targetType: 'product', targetValue: 'all',
+        platform: 'all', title, body, deepLink, scheduledFor: null,
+        authorId: `github-actions:${claims.repository}`,
+      });
+      return res.status(result.duplicatePrevented ? 200 : 201).json({
+        accepted: true, duplicatePrevented: result.duplicatePrevented,
+        notificationId: result.campaign.notificationId,
+        sentCount: result.campaign.sentCount, failedCount: result.campaign.failedCount,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Notification dispatch failed';
+      const status = msg.startsWith('CONCURRENT_IDEMPOTENCY_LOCK') ||
+        msg.startsWith('IDEMPOTENCY_PAYLOAD_MISMATCH') ? 409 : 422;
+      return res.status(status).json({ error: msg });
+    }
+  });
+
   // Dispatch or Schedule Central FCM Notification (Admin Only)
   app.post(
     '/api/v1/notifications/send',
@@ -1148,7 +1230,6 @@ export async function createGoGoApp() {
   // Read Audit Logs (Admin Only, Bounded)
   app.get(
     '/api/v1/audit-logs',
-    standardApiLimiter,
     requireAuth,
     requireAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
@@ -1161,7 +1242,6 @@ export async function createGoGoApp() {
   // Read Security Events (Admin Only, Bounded)
   app.get(
     '/api/v1/security-events',
-    standardApiLimiter,
     requireAuth,
     requireAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
@@ -1174,7 +1254,6 @@ export async function createGoGoApp() {
   // Read System Configuration (Admin Only)
   app.get(
     '/api/v1/system-config',
-    standardApiLimiter,
     requireAuth,
     requireAdmin,
     async (_req: AuthenticatedRequest, res: Response) => {
