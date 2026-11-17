@@ -2,7 +2,7 @@
 
 ## Current state
 
-- Production runs on Render (free tier): https://gogo-central-backend-mg6z.onrender.com
+- Production runs on Render (free tier): https://gogo-central-backend.onrender.com
 - CI (`.github/workflows/ci.yml`) runs: TypeScript strict, security rules,
   REG/PGT/MX suites, Docker Compose runtime probes, lockfile verification,
   npm audit (report-only), Gitleaks.
