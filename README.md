@@ -49,7 +49,9 @@ Scope of the Compose stack: `docker-compose.yml` is a local development/demo con
 | `CORS_ALLOWED_ORIGINS` | unset | Comma-separated extra origins merged into the GoGo-owned allowlist (`gogocompany.in` and subdomains). |
 | `SQL_HOST`, `SQL_PORT`, `SQL_DB_NAME`, `SQL_USER`, `SQL_PASSWORD`, `PG_PROVIDER` | see `.env.example` | PostgreSQL connection settings consumed by the runtime pool (`src/db/pool.ts`), the migration runner, and backup/restore scripts. If the database is unreachable at startup in PostgreSQL mode, the server exits with a sanitized error (never a silent in-memory fallback). |
 | `PG_STATEMENT_TIMEOUT_MS`, `PG_QUERY_TIMEOUT_MS` | `15000` | Per-statement/query guard rails (milliseconds) against hostile or stalled queries. |
-| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Firebase service-account JSON used by `firebase-admin` for Auth verification and FCM. Without it, the server runs with demo `fcm_*` token simulation and Firebase token verification fails closed (401). |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | unset | Preferred Render secret environment variable containing the complete Firebase service-account JSON. Its `project_id` must equal `gen-lang-client-0566323659`. Never commit or paste this value into source control. |
+| `FIREBASE_SERVICE_ACCOUNT` | unset | Optional compatibility alias for the JSON service-account secret. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to a Render Secret File containing the Firebase service-account JSON, or (for compatibility) the complete JSON value. If no credential source is configured, Firebase Auth verification fails closed (401). |
 
 ---
 
@@ -81,6 +83,10 @@ TypeScript `strict` mode is enabled in `tsconfig.json` and enforced by the CI ty
 [Testcontainers for Node.js](https://node.testcontainers.org) was evaluated for the PostgreSQL integration tests and deliberately not added. The repo already has a real-database test setup that Testcontainers would duplicate, not improve: the `PGT-01..PGT-23` suite runs against a real managed PostgreSQL 18 service in CI, and the `docker-compose-runtime` job boots the actual application and database together. Unit tests intentionally stay Docker-free (plain `npm test` works anywhere), and a second container-based database setup would add a dependency, require Docker for ordinary test runs, and create two competing PostgreSQL harnesses. If isolated per-test database containers become a concrete need later, Testcontainers can be added as a focused optional utility for the integration suite only.
 
 CI also prints `node --version`/`npm --version` and fails if the toolchain is below the installed `@firebase/*` engines requirement (>=24.12.0), inside the test job and inside the running container.
+
+### Render Firebase credential setup (required for live Auth and FCM)
+
+On Render, open the `gogo-central-backend` Web Service → Environment. Add `FIREBASE_SERVICE_ACCOUNT_JSON` as a **Secret** containing the complete service-account JSON for Firebase project `gen-lang-client-0566323659`, then save and redeploy. The backend accepts escaped `\\n` line breaks in `private_key` and normalizes them. Alternatively, upload the JSON as a Render Secret File and set `GOOGLE_APPLICATION_CREDENTIALS` to its mounted path. Never put the private key in GitHub, a public issue, or chat. After deployment, check `GET /api/v1/health/firebase`: expect `credentialsEnvSet: true`, `credentialFileState: parsed-env-json` (or `parsed` for a Secret File), `projectIdMatches: true`, and `liveProbeErrorCode: auth/user-not-found`.
 
 ### Manual real-Firebase verification (NOT executable in CI — requires your credentials)
 
