@@ -1124,7 +1124,7 @@ export async function createGoGoApp() {
       candidate.events.includes(eventType)
     );
     const validRef = rule?.release
-      ? /^refs\\/tags\\/[A-Za-z0-9._-]{1,80}$/.test(claims.ref)
+      ? /^refs\/tags\/[A-Za-z0-9._-]{1,80}$/.test(claims.ref)
       : claims.ref === 'refs/heads/main';
     if (!rule || !validRef || !claims.workflow_ref.endsWith(claims.ref)) {
       await store().recordSecurityEvent('RBAC_VIOLATION', rule?.appId || 'central-control',
