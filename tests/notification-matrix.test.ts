@@ -341,9 +341,9 @@ async function tierBPostgresTests(): Promise<void> {
     assertEqual(reOptIn.status, 'active', 're-opt-in reactivates the revoked device');
   });
 
-  await test('MX-06', 'PostgreSQL: ecosystem (all-gogo) target selection reaches devices across all five products (MOCKED dry-run FCM)', async () => {
+  await test('MX-06', 'PostgreSQL: ecosystem (all-gogo) target selection reaches devices across all five products (MOCKED FCM send)', async () => {
     const savedDryRun = process.env.FCM_DRY_RUN;
-    process.env.FCM_DRY_RUN = 'true';
+    process.env.FCM_DRY_RUN = 'false';
     // MOCKED FCM: deterministic success so receipt accounting is observable.
     setTestFirebaseOverrides({
       sendEachForMulticast: async (message) => {
@@ -378,6 +378,44 @@ async function tierBPostgresTests(): Promise<void> {
       for (const appId of ECOSYSTEM_APPS) {
         assert(deliveredApps.has(appId), `ecosystem dispatch reached ${appId}`);
       }
+    } finally {
+      setTestFirebaseOverrides({});
+      if (savedDryRun === undefined) delete process.env.FCM_DRY_RUN;
+      else process.env.FCM_DRY_RUN = savedDryRun;
+    }
+  });
+
+  await test('MX-13', 'PostgreSQL: FCM_DRY_RUN validates tokens but never increments delivered / sent counts', async () => {
+    const savedDryRun = process.env.FCM_DRY_RUN;
+    process.env.FCM_DRY_RUN = 'true';
+    setTestFirebaseOverrides({
+      sendEachForMulticast: async (message) => {
+        const tokens = (message as unknown as { tokens: string[] }).tokens;
+        return {
+          responses: tokens.map(() => ({
+            success: true,
+            messageId: 'projects/gogo-ci/messages/MX_DRY_RUN_ONLY',
+          })),
+        };
+      },
+    });
+    try {
+      const result = await store.dispatchNotification({
+        idempotencyKey: `${RUN}_dryrun`,
+        appId: ECOSYSTEM_APPS[0],
+        targetType: 'individual',
+        targetValue: `${RUN}_dev_0`,
+        platform: 'web',
+        title: 'MX-13 dry-run validation',
+        body: 'must not be counted as delivered',
+        deepLink: DEEPLINK,
+        scheduledFor: null,
+        authorId: authorUid,
+      });
+      assertEqual(result.campaign.sentCount, 0, 'dry-run must never increment Sent');
+      assertEqual(result.campaign.failedCount, 0, 'dry-run validation is not a delivery failure');
+      assertEqual(result.deliveriesCreated[0]?.status, 'skipped_preference', 'dry-run receipt is classified as skipped');
+      assertEqual(result.deliveriesCreated[0]?.fcmMessageId, 'dryrun:projects/gogo-ci/messages/MX_DRY_RUN_ONLY', 'dry-run message ID is visibly marked as non-delivery');
     } finally {
       setTestFirebaseOverrides({});
       if (savedDryRun === undefined) delete process.env.FCM_DRY_RUN;
@@ -490,7 +528,7 @@ async function tierBPostgresTests(): Promise<void> {
     // Retry: MOCKED transient failure, then MOCKED recovery on the retry.
     const appId = ECOSYSTEM_APPS[3];
     const savedDryRun = process.env.FCM_DRY_RUN;
-    process.env.FCM_DRY_RUN = 'true';
+    process.env.FCM_DRY_RUN = 'false';
     setTestFirebaseOverrides({
       sendEachForMulticast: async (message) => {
         const tokens = (message as unknown as { tokens: string[] }).tokens;
@@ -544,7 +582,7 @@ async function tierBPostgresTests(): Promise<void> {
   await test('MX-10', 'PostgreSQL: invalid token cleanup (MOCKED not-registered -> failed_expired_token + device marked expired)', async () => {
     const appId = ECOSYSTEM_APPS[4];
     const savedDryRun = process.env.FCM_DRY_RUN;
-    process.env.FCM_DRY_RUN = 'true';
+    process.env.FCM_DRY_RUN = 'false';
     // MOCKED FCM: the SDK says the registration token is no longer registered.
     setTestFirebaseOverrides({
       sendEachForMulticast: async (message) => {

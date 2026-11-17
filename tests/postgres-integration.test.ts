@@ -611,6 +611,8 @@ async function main(): Promise<void> {
   });
 
   await test('PGT-15', 'Timezone handling: same quiet window, different IANA zones, different outcome', async () => {
+    const savedDryRun = process.env.FCM_DRY_RUN;
+    process.env.FCM_DRY_RUN = 'false';
     assertEqual(isValidIANATimezone('Asia/Kolkata'), true, 'valid IANA zone accepted');
     assertEqual(isValidIANATimezone('Mars/Olympus_Mons'), false, 'invalid IANA zone rejected');
 
@@ -693,6 +695,8 @@ async function main(): Promise<void> {
       assertEqual(isInQuietHours(new Date(), '23:00', '01:00', null), false, 'null timezone → no enforcement (documented)');
     } finally {
       setTestFirebaseOverrides({});
+      if (savedDryRun === undefined) delete process.env.FCM_DRY_RUN;
+      else process.env.FCM_DRY_RUN = savedDryRun;
     }
   });
 
@@ -989,7 +993,7 @@ async function main(): Promise<void> {
       const byDevice = new Map(receipts.map((r) => [r.device_id, r]));
 
       const ok = byDevice.get(`dev_${RUN}_fcmok`);
-      assertEqual(ok?.status, 'delivered', 'successful mocked send recorded delivered');
+      assertEqual(ok?.status, 'skipped_preference', 'successful mocked dry-run is skipped, never delivered');
       assert(
         (ok?.fcm_message_id ?? '').startsWith('dryrun:'),
         `dry-run receipt must carry the dryrun: prefix (got ${ok?.fcm_message_id})`
@@ -1012,7 +1016,7 @@ async function main(): Promise<void> {
       );
 
       assertEqual(finalCampaign!.status, 'partial_failure', 'campaign honestly partial_failure');
-      assertEqual(finalCampaign!.sentCount, 1, 'sentCount 1');
+      assertEqual(finalCampaign!.sentCount, 0, 'dry-run must not increment sentCount');
       assertEqual(finalCampaign!.failedCount, 2, 'failedCount 2');
     } finally {
       setTestFirebaseOverrides({});
