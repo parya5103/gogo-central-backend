@@ -14,18 +14,101 @@
  * verification (that requires GOOGLE_APPLICATION_CREDENTIALS; see README).
  */
 
-import { initializeApp, getApps } from 'firebase-admin/app';
+import { cert, initializeApp, getApps } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
 import type { MulticastMessage, BatchResponse } from 'firebase-admin/messaging';
 import fs from 'node:fs';
+import path from 'node:path';
 import firebaseConfig from '../../firebase-applet-config.json';
 
+/**
+ * Resolve Firebase Admin credentials without requiring users to know Render's
+ * generated mount path. An explicit GOOGLE_APPLICATION_CREDENTIALS path wins;
+ * otherwise inspect Render Secret Files in /etc/secrets for one service-account
+ * JSON belonging to this exact Firebase project. Never read arbitrary repo files.
+ */
+type ResolvedServiceAccount = {
+  credential: Parameters<typeof cert>[0];
+  projectId: string;
+  source: 'env-path' | 'render-secret-file';
+};
+
+function readServiceAccountFile(filePath: string): ResolvedServiceAccount | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+    const projectId = typeof parsed.project_id === 'string' ? parsed.project_id : '';
+    const clientEmail = typeof parsed.client_email === 'string' ? parsed.client_email : '';
+    const privateKey = typeof parsed.private_key === 'string' ? parsed.private_key : '';
+    if (
+      parsed.type !== 'service_account' ||
+      !projectId ||
+      !clientEmail ||
+      !privateKey ||
+      projectId !== firebaseConfig.projectId
+    ) {
+      return null;
+    }
+    return {
+      credential: cert(parsed as Parameters<typeof cert>[0] extends string ? never : object as Parameters<typeof cert>[0]),
+      projectId,
+      source: process.env.GOOGLE_APPLICATION_CREDENTIALS ? 'env-path' : 'render-secret-file',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveServiceAccount(): {
+  account: ResolvedServiceAccount | null;
+  state: string;
+  projectId: string | null;
+} {
+  const configuredPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  if (configuredPath) {
+    const account = readServiceAccountFile(configuredPath);
+    if (account) return { account, state: 'parsed', projectId: account.projectId };
+    return {
+      account: null,
+      state: fs.existsSync(configuredPath) ? 'invalid-or-wrong-project' : 'missing',
+      projectId: null,
+    };
+  }
+
+  const secretDirectory = '/etc/secrets';
+  try {
+    const candidates = fs
+      .readdirSync(secretDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => readServiceAccountFile(path.join(secretDirectory, entry.name)))
+      .filter((entry): entry is ResolvedServiceAccount => entry !== null);
+
+    if (candidates.length === 1) {
+      return { account: candidates[0], state: 'parsed-render-secret-file', projectId: candidates[0].projectId };
+    }
+    if (candidates.length > 1) {
+      return { account: null, state: 'multiple-matching-secret-files', projectId: null };
+    }
+    return { account: null, state: 'no-matching-secret-file', projectId: null };
+  } catch {
+    return { account: null, state: 'secret-directory-unavailable', projectId: null };
+  }
+}
+
+const resolvedServiceAccount = resolveServiceAccount();
+
 if (!getApps().length) {
-  initializeApp({
-    projectId: firebaseConfig.projectId,
-  });
+  initializeApp(
+    resolvedServiceAccount.account
+      ? {
+          credential: resolvedServiceAccount.account.credential,
+          projectId: firebaseConfig.projectId,
+        }
+      : {
+          projectId: firebaseConfig.projectId,
+        }
+  );
 }
 
 export const adminAuth = getAuth();
@@ -99,27 +182,8 @@ export async function sendFcmMulticast(
  * the raw error CODE of a deliberately failing live probe.
  */
 export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>> {
-  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
-
-  let credentialFileState = 'env-not-set';
-  let credentialProjectId: string | null = null;
-  if (credentialsPath) {
-    try {
-      const credJson = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8')) as Record<
-        string,
-        unknown
-      >;
-      credentialProjectId =
-        typeof credJson.project_id === 'string' ? credJson.project_id : null;
-      credentialFileState = credentialProjectId ? 'parsed' : 'parsed-no-project-id';
-    } catch {
-      try {
-        credentialFileState = fs.existsSync(credentialsPath) ? 'exists-not-json' : 'missing';
-      } catch {
-        credentialFileState = 'unreadable';
-      }
-    }
-  }
+  const credentialFileState = resolvedServiceAccount.state;
+  const credentialProjectId = resolvedServiceAccount.projectId;
 
   // Live probe exercising the FULL credential chain end-to-end. Healthy
   // credentials always yield auth/user-not-found for a nonexistent UID;
@@ -137,7 +201,8 @@ export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>
 
   return {
     adminAppInitialized: getApps().length > 0,
-    credentialsEnvSet: Boolean(credentialsPath),
+    credentialsEnvSet: Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS),
+    credentialsSource: resolvedServiceAccount.account?.source ?? 'application-default-credentials',
     credentialFileState,
     credentialProjectId,
     expectedProjectId: firebaseConfig.projectId,
