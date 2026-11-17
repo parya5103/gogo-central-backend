@@ -23,7 +23,7 @@ import {
   closePool,
   mapPgError,
 } from '../src/db/pool.ts';
-import { upsertUserFromFirebase, getUser, hasUser, recordUserAppAccess, setUserTimezone, ensureGitHubActionsServiceUser } from '../src/repositories/users.repository.ts';
+import { upsertUserFromFirebase, getUser, hasUser, recordUserAppAccess, setUserTimezone } from '../src/repositories/users.repository.ts';
 import { createDevice, getDevice } from '../src/repositories/devices.repository.ts';
 import { upsertPreference, getPreference, listPreferences } from '../src/repositories/preferences.repository.ts';
 import {
@@ -1026,7 +1026,7 @@ async function main(): Promise<void> {
   });
 
   await test('PGT-24', 'GitHub Actions automation principal can author product-update campaigns without admin privileges', async () => {
-    await ensureGitHubActionsServiceUser();
+    await store.ensureGitHubActionsPrincipal();
     const automationUser = await getUser('system:github-actions');
     assert(automationUser !== null, 'automation principal persisted');
     assertEqual(automationUser!.role, 'user', 'automation principal is never an admin');
