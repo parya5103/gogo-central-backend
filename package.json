@@ -17,7 +17,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test:oidc": "tsx tests/github-actions-oidc.test.ts"
+    "test:oidc": "tsx tests/github-actions-oidc.test.ts",
+    "test:rate-limit": "tsx tests/rate-limit-pg.test.ts"
   },
   "dependencies": {
     "@firebase/eslint-plugin-security-rules": "^0.0.2",
