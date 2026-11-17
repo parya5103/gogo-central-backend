@@ -371,6 +371,13 @@ export class NotificationWorker {
   ): Promise<{ campaign: NotificationCampaignRecord | null; error?: string }> {
     const campaign = await getCampaign(notificationId);
     if (!campaign) return { campaign: null, error: 'NOT_FOUND' };
+    if (process.env.NODE_ENV === 'production' && !FIREBASE_ADMIN_CONFIGURED) {
+      await finalizeCampaign(notificationId, { status: 'failed', sentCount: 0, failedCount: 0 });
+      return { campaign: await getCampaign(notificationId), error: 'FIREBASE_ADMIN_NOT_CONFIGURED' };
+    }
+    if (process.env.NODE_ENV === 'production' && process.env.FCM_DRY_RUN !== 'true') {
+      await pruneNonFcmDeviceTokens();
+    }
 
     const maxRetries = await getNumberConfig('fcm_max_retries', 3);
     if (campaign.retryCount >= maxRetries) {
