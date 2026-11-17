@@ -51,6 +51,12 @@ Scope of the Compose stack: `docker-compose.yml` is a local development/demo con
 | `PG_STATEMENT_TIMEOUT_MS`, `PG_QUERY_TIMEOUT_MS` | `15000` | Per-statement/query guard rails (milliseconds) against hostile or stalled queries. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Firebase service-account JSON used by `firebase-admin` for Auth verification and FCM. Without it, the server runs with demo `fcm_*` token simulation and Firebase token verification fails closed (401). |
 
+### Render Secret File setup (Firebase project `gen-lang-client-0566323659`)
+
+In the Render service **gogo-central-backend** (Gogo backend workspace), add the Firebase service-account JSON as a **Secret File** (not a committed repository file). The runtime now searches Render's `/etc/secrets` directory for a JSON file whose `project_id` exactly matches `gen-lang-client-0566323659`. It also supports `GOOGLE_APPLICATION_CREDENTIALS` or `FIREBASE_SERVICE_ACCOUNT_FILE` pointing to the mounted file, and `FIREBASE_SERVICE_ACCOUNT_JSON` as a secret environment value. If you use an explicit path, Render Secret Files are mounted at `/etc/secrets/<filename>`.
+
+After saving the Secret File, redeploy/restart the service and check `https://gogo-central-backend.onrender.com/api/v1/health/firebase`. A healthy credential should report `credentialFileState: "parsed"`, `projectIdMatches: true`, and `liveProbeErrorCode: "auth/user-not-found"`. Never paste the JSON/private key into GitHub, chat, or logs.
+
 ---
 
 ## 1b. Persistence Status (v2.0.0)
