@@ -951,6 +951,18 @@ export async function createGoGoApp() {
       }
 
       const { appId, fcmToken, platform, userAgent } = parsed.data;
+      if (
+        process.env.NODE_ENV === 'production' &&
+        (fcmToken.startsWith('fcm_') ||
+          fcmToken.trim().startsWith('{') ||
+          fcmToken.trim().startsWith('[') ||
+          fcmToken.length <= 100)
+      ) {
+        return res.status(400).json({
+          error: 'A real Firebase Cloud Messaging registration token is required.',
+          code: 'INVALID_FCM_REGISTRATION_TOKEN',
+        });
+      }
       if (!(await store().hasApp(appId))) {
         return res.status(404).json({ error: `Target GoGo product '${appId}' does not exist.` });
       }
