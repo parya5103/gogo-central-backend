@@ -31,7 +31,7 @@ interface AuditTestResult {
 
 async function runStandaloneSecurityAudit() {
   process.env.GOGO_TEST_IMPORT = 'true';
-  const { createGoGoApp, extractTrustedClientIp } = await import('../server.ts');
+  const { createGoGoApp, extractTrustedClientIp, buildOpenApiDocument } = await import('../server.ts');
   const results: AuditTestResult[] = [];
   const app = await createGoGoApp();
 
@@ -754,6 +754,52 @@ async function runStandaloneSecurityAudit() {
       });
     }
 
+    // 21. [LOW] OpenAPI document is served and can never go stale: it is
+    // generated from the live Zod schemas at request time, so the served
+    // document must exactly match a freshly generated one.
+    {
+      // Unique X-Forwarded-For: REG-18's limiter burst above exhausts the shared
+      // in-memory bucket; a fresh client IP gives this request a clean rate-limit
+      // bucket instead of a 429 (same pattern as REG-23/REG-24 blocks).
+      const res = await fetch(`${baseUrl}/api/v1/openapi.json`, {
+        headers: { 'X-Forwarded-For': '203.0.113.79' },
+      });
+      assert.equal(res.status, 200);
+      const served = (await res.json()) as Record<string, unknown>;
+      const generated = buildOpenApiDocument() as Record<string, unknown>;
+      assert.equal((served as { openapi?: string }).openapi, '3.1.0');
+      assert.deepStrictEqual(
+        served,
+        JSON.parse(JSON.stringify(generated)),
+        'served /api/v1/openapi.json must exactly match buildOpenApiDocument()'
+      );
+      const paths = Object.keys((served as { paths: Record<string, unknown> }).paths);
+      for (const required of [
+        '/api/v1/apps',
+        '/api/v1/devices/register',
+        '/api/v1/preferences/{appId}',
+        '/api/v1/notifications/send',
+      ]) {
+        assert.ok(paths.includes(required), 'openapi paths must include ' + required);
+      }
+      const schemas = (served as { components: { schemas: Record<string, unknown> } }).components.schemas;
+      for (const required of [
+        'RegisterAppSchema',
+        'UpdateAppSchema',
+        'RegisterDeviceSchema',
+        'UpdatePreferenceSchema',
+        'SendNotificationSchema',
+      ]) {
+        assert.ok(required in schemas, 'openapi components.schemas must include ' + required);
+      }
+      results.push({
+        id: 'REG-21',
+        severity: 'LOW',
+        name: 'OpenAPI Document Served & Generated From Live Zod Schemas (No Staleness)',
+        passed: true,
+        detail: 'GET /api/v1/openapi.json returns an OpenAPI 3.1 document that deep-equals buildOpenApiDocument() with all five Zod-derived request schemas and the documented routes present.',
+      });
+    }
     console.log(
       JSON.stringify(
         {
