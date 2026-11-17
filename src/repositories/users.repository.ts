@@ -92,6 +92,30 @@ export async function upsertUserFromFirebase(params: {
   );
 }
 
+/**
+ * Ensure a least-privilege database principal exists for trusted GitHub Actions
+ * automation. notification_campaigns.author_id has a FK to users(uid), so
+ * workflow campaigns must use a real row rather than an unregistered identity.
+ * This principal is deliberately non-admin and cannot authenticate as a user.
+ */
+export async function ensureGitHubActionsServiceUser(): Promise<void> {
+  await query(
+    `INSERT INTO users
+       (uid, display_name, role, email_masked, email_verified, auth_provider, is_active)
+     VALUES
+       ('system:github-actions', 'GitHub Actions automation', 'user',
+        'automation@system.invalid', FALSE, 'anonymous_guest', TRUE)
+     ON CONFLICT (uid) DO UPDATE SET
+       display_name = EXCLUDED.display_name,
+       role = 'user',
+       email_masked = EXCLUDED.email_masked,
+       email_verified = FALSE,
+       auth_provider = 'anonymous_guest',
+       is_active = TRUE,
+       updated_at = NOW()`
+  );
+}
+
 /** Records the app a user connected to (used for connectedApps + counts). */
 export async function recordUserAppAccess(uid: string, appId: string): Promise<void> {
   await query(
