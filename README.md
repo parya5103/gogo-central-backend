@@ -49,7 +49,9 @@ Scope of the Compose stack: `docker-compose.yml` is a local development/demo con
 | `CORS_ALLOWED_ORIGINS` | unset | Comma-separated extra origins merged into the GoGo-owned allowlist (`gogocompany.in` and subdomains). |
 | `SQL_HOST`, `SQL_PORT`, `SQL_DB_NAME`, `SQL_USER`, `SQL_PASSWORD`, `PG_PROVIDER` | see `.env.example` | PostgreSQL connection settings consumed by the runtime pool (`src/db/pool.ts`), the migration runner, and backup/restore scripts. If the database is unreachable at startup in PostgreSQL mode, the server exits with a sanitized error (never a silent in-memory fallback). |
 | `PG_STATEMENT_TIMEOUT_MS`, `PG_QUERY_TIMEOUT_MS` | `15000` | Per-statement/query guard rails (milliseconds) against hostile or stalled queries. |
-| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Firebase service-account JSON used by `firebase-admin` for Auth verification and FCM. Without it, the server runs with demo `fcm_*` token simulation and Firebase token verification fails closed (401). |
+| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Optional explicit path to the Firebase service-account JSON used by `firebase-admin` for Auth verification and FCM. On Render, a matching service-account JSON Secret File in `/etc/secrets/` is auto-discovered when this variable is unset; if multiple matching files exist, set this variable to the exact mounted path. Without either source, Firebase token verification fails closed (401). |
+
+**Render Secret File setup:** upload the JSON downloaded from Firebase Console → Project settings → Service accounts as a Render Secret File (not a normal environment variable). The backend scans `/etc/secrets/` for a JSON service account whose `project_id` exactly matches `gen-lang-client-0566323659`. It validates the project ID and required key fields before initializing Firebase Admin. The diagnostic endpoint `/api/v1/health/firebase` reports only credential state/source and public project IDs, never private-key contents.
 
 ---
 
