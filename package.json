@@ -7,7 +7,7 @@
     "dev": "tsx server.ts",
     "build": "vite build",
     "start": "node --import tsx server.ts",
-    "test": "GOGO_TEST_IMPORT=true tsx tests/security-audit.test.ts",
+    "test": "tsx tests/firebase-credentials.test.ts && GOGO_TEST_IMPORT=true tsx tests/security-audit.test.ts",
     "test:pg": "GOGO_TEST_IMPORT=true tsx tests/postgres-integration.test.ts",
     "test:matrix": "GOGO_TEST_IMPORT=true tsx tests/notification-matrix.test.ts",
     "db:verify": "tsx scripts/db-manager.ts verify",
