@@ -14,7 +14,7 @@
  * verification (that requires GOOGLE_APPLICATION_CREDENTIALS; see README).
  */
 
-import { initializeApp, getApps } from 'firebase-admin/app';
+import { applicationDefault, cert, initializeApp, getApps } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
@@ -22,9 +22,96 @@ import type { MulticastMessage, BatchResponse } from 'firebase-admin/messaging';
 import fs from 'node:fs';
 import firebaseConfig from '../../firebase-applet-config.json';
 
+type ServiceAccountJson = {
+  project_id?: unknown;
+  client_email?: unknown;
+  private_key?: unknown;
+};
+
+type ResolvedServiceAccount = {
+  projectId: string;
+  clientEmail: string;
+  privateKey: string;
+  source: 'json-env' | 'explicit-file' | 'render-secret-file';
+};
+
+function parseServiceAccount(raw: string): Omit<ResolvedServiceAccount, 'source'> | null {
+  try {
+    const value = JSON.parse(raw) as ServiceAccountJson;
+    if (
+      value.project_id !== firebaseConfig.projectId ||
+      typeof value.client_email !== 'string' ||
+      !value.client_email.includes('@') ||
+      typeof value.private_key !== 'string' ||
+      !value.private_key.includes('PRIVATE KEY')
+    ) return null;
+    return { projectId: value.project_id, clientEmail: value.client_email, privateKey: value.private_key };
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve a matching Firebase service-account JSON from Render Secret Files. */
+function resolveServiceAccount(): {
+  account: ResolvedServiceAccount | null;
+  state: string;
+  projectId: string | null;
+} {
+  const jsonEnv = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (jsonEnv) {
+    const parsed = parseServiceAccount(jsonEnv);
+    if (parsed) return { account: { ...parsed, source: 'json-env' }, state: 'parsed', projectId: parsed.projectId };
+  }
+
+  const explicitPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.FIREBASE_SERVICE_ACCOUNT_FILE || '';
+  if (explicitPath) {
+    try {
+      const parsed = parseServiceAccount(fs.readFileSync(explicitPath, 'utf-8'));
+      if (parsed) return { account: { ...parsed, source: 'explicit-file' }, state: 'parsed', projectId: parsed.projectId };
+    } catch {
+      // Continue to Render's standard secret-file mount directory.
+    }
+  }
+
+  const secretDirectory = '/etc/secrets';
+  try {
+    if (fs.existsSync(secretDirectory)) {
+      const entries = fs.readdirSync(secretDirectory, { withFileTypes: true });
+      for (const entry of entries.slice(0, 50)) {
+        if (!entry.isFile()) continue;
+        try {
+          const parsed = parseServiceAccount(fs.readFileSync(secretDirectory + '/' + entry.name, 'utf-8'));
+          if (parsed) {
+            return { account: { ...parsed, source: 'render-secret-file' }, state: 'parsed', projectId: parsed.projectId };
+          }
+        } catch {
+          // Ignore unrelated secret files without exposing their contents.
+        }
+      }
+    }
+  } catch {
+    return { account: null, state: 'secret-directory-unreadable', projectId: null };
+  }
+
+  return {
+    account: null,
+    state: explicitPath ? 'explicit-file-unavailable-or-invalid' : 'no-matching-secret-file',
+    projectId: null,
+  };
+}
+
+const serviceAccountResolution = resolveServiceAccount();
+
 if (!getApps().length) {
   initializeApp({
     projectId: firebaseConfig.projectId,
+    credential: serviceAccountResolution.account
+      ? cert({
+          projectId: serviceAccountResolution.account.projectId,
+          clientEmail: serviceAccountResolution.account.clientEmail,
+          privateKey: serviceAccountResolution.account.privateKey,
+        })
+      : applicationDefault(),
   });
 }
 
@@ -99,51 +186,28 @@ export async function sendFcmMulticast(
  * the raw error CODE of a deliberately failing live probe.
  */
 export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>> {
-  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
-
-  let credentialFileState = 'env-not-set';
-  let credentialProjectId: string | null = null;
-  if (credentialsPath) {
-    try {
-      const credJson = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8')) as Record<
-        string,
-        unknown
-      >;
-      credentialProjectId =
-        typeof credJson.project_id === 'string' ? credJson.project_id : null;
-      credentialFileState = credentialProjectId ? 'parsed' : 'parsed-no-project-id';
-    } catch {
-      try {
-        credentialFileState = fs.existsSync(credentialsPath) ? 'exists-not-json' : 'missing';
-      } catch {
-        credentialFileState = 'unreadable';
-      }
-    }
-  }
-
-  // Live probe exercising the FULL credential chain end-to-end. Healthy
-  // credentials always yield auth/user-not-found for a nonexistent UID;
-  // any other code pinpoints the exact server-side config failure.
   let liveProbeErrorCode: string | null = null;
-  let liveProbeErrorDetail: string | null = null;
   try {
     await adminAuth.getUser('diagnostic-nonexistent-uid');
     liveProbeErrorCode = 'unexpected-success';
   } catch (error) {
-    const err = error as { code?: string; message?: string };
+    const err = error as { code?: string };
     liveProbeErrorCode = typeof err.code === 'string' ? err.code : 'unknown-error-code';
-    liveProbeErrorDetail = String(err.message || '').slice(0, 160);
   }
 
   return {
     adminAppInitialized: getApps().length > 0,
-    credentialsEnvSet: Boolean(credentialsPath),
-    credentialFileState,
-    credentialProjectId,
+    credentialsEnvSet: Boolean(
+      process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+      process.env.FIREBASE_SERVICE_ACCOUNT_FILE ||
+      process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+    ),
+    credentialFileState: serviceAccountResolution.state,
+    credentialProjectId: serviceAccountResolution.projectId,
+    credentialSource: serviceAccountResolution.account?.source || 'application-default',
     expectedProjectId: firebaseConfig.projectId,
-    projectIdMatches: credentialProjectId === firebaseConfig.projectId,
+    projectIdMatches: serviceAccountResolution.projectId === firebaseConfig.projectId,
     liveProbeErrorCode,
-    liveProbeErrorDetail,
     fcmDryRun: process.env.FCM_DRY_RUN === 'true',
   };
 }
