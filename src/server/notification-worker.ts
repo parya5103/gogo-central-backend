@@ -15,12 +15,12 @@
  * - Graceful shutdown stops the loop without losing queued work: everything
  *   pending stays durable in PostgreSQL.
  *
- * FCM honesty contract (same as the engine):
- * - demo `fcm_*` tokens → simulated receipts with `simulated:` message IDs
- * - real tokens → sendFcmMulticast (Admin SDK) in 500-token chunks
- * - SDK error codes are read from the error's `code` property (canonical
- *   `messaging/*` string) before falling back to String(error)
- * - FCM_DRY_RUN=true keeps live sends in dry-run mode
+ * FCM honesty contract:
+ * - only the Firebase Admin SDK can produce a delivered receipt;
+ * - demo `fcm_*`, serialized PushSubscription, and malformed tokens are
+ *   rejected/pruned and can never be reported as delivered;
+ * - FCM_DRY_RUN=true validates with Firebase but records a skipped receipt,
+ *   never a successful delivery;
  * - Delivery is at-least-once (durable dedup), never claimed exactly-once.
  */
 
@@ -305,8 +305,8 @@ export class NotificationWorker {
               notification: {
                 title: campaign.title,
                 body: campaign.body,
-                icon: 'https://gogocompany.in/favicon.svg',
-                badge: 'https://gogocompany.in/favicon.svg',
+                icon: 'https://gogocompany.in/favicon.ico',
+                badge: 'https://gogocompany.in/favicon.ico',
                 tag: campaign.idempotencyKey,
                 renotify: true,
                 requireInteraction: true,
@@ -322,12 +322,17 @@ export class NotificationWorker {
           const resp = response.responses[idx];
           if (resp.success) {
             const rawMessageId = resp.messageId ?? null;
-            console.info('[FCM] Message accepted by Firebase:', {
+            const dryRun = process.env.FCM_DRY_RUN === 'true';
+            console.info(dryRun ? '[FCM] Dry-run validation accepted (not delivered):' : '[FCM] Message accepted by Firebase:', {
               notificationId: campaign.notificationId,
               deviceId: dev.deviceId,
               messageId: rawMessageId,
             });
-            await recordReceipt(dev, 'delivered', null, markDryRunMessageId(rawMessageId), null);
+            if (dryRun) {
+              await recordReceipt(dev, 'skipped_preference', 'fcm-dry-run', markDryRunMessageId(rawMessageId), 'fcm-dry-run');
+            } else {
+              await recordReceipt(dev, 'delivered', null, rawMessageId, null);
+            }
           } else {
             const errorCode = extractFcmErrorCode(resp.error);
             const errorClass = classifyFcmError(errorCode);
@@ -435,8 +440,8 @@ export class NotificationWorker {
               notification: {
                 title: campaign.title,
                 body: campaign.body,
-                icon: 'https://gogocompany.in/favicon.svg',
-                badge: 'https://gogocompany.in/favicon.svg',
+                icon: 'https://gogocompany.in/favicon.ico',
+                badge: 'https://gogocompany.in/favicon.ico',
                 tag: campaign.idempotencyKey,
                 renotify: true,
                 requireInteraction: true,
@@ -449,15 +454,16 @@ export class NotificationWorker {
         );
         const resp = response.responses[0];
         if (resp?.success) {
-          console.info('[FCM] Retry message accepted by Firebase:', {
+          const dryRun = process.env.FCM_DRY_RUN === 'true';
+          console.info(dryRun ? '[FCM] Retry dry-run validation accepted (not delivered):' : '[FCM] Retry message accepted by Firebase:', {
             notificationId,
             deviceId: device.deviceId,
             messageId: resp.messageId ?? null,
           });
           await updateDeliveryOutcome(delivery.deliveryId, {
-            status: 'delivered',
-            errorCode: null,
-            fcmMessageId: markDryRunMessageId(resp.messageId ?? null),
+            status: dryRun ? 'skipped_preference' : 'delivered',
+            errorCode: dryRun ? 'fcm-dry-run' : null,
+            fcmMessageId: dryRun ? markDryRunMessageId(resp.messageId ?? null) : (resp.messageId ?? null),
             retryCount: delivery.retryCount,
             nextAttemptAt: null,
           });
