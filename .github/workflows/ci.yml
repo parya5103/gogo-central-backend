@@ -69,6 +69,9 @@ jobs:
       - name: Run Security Audit & HTTP Regression Test Suite
         run: set -o pipefail && npm test 2>&1 | tee /tmp/test.log
 
+      - name: GitHub Actions OIDC verifier tests
+        run: npm run test:oidc
+
       - name: PostgreSQL Integration Tests (real database, no mocks)
         env:
           SQL_HOST: 127.0.0.1
