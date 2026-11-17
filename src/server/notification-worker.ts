@@ -24,7 +24,7 @@
  * - Delivery is at-least-once (durable dedup), never claimed exactly-once.
  */
 
-import { sendFcmMulticast } from '../lib/firebase-admin.ts';
+import { sendFcmMulticast, FIREBASE_ADMIN_CONFIGURED } from '../lib/firebase-admin.ts';
 import type {
   NotificationCampaignRecord,
   DeviceTokenRecord,
@@ -48,7 +48,7 @@ import {
   insertDeliveryReceipt,
   updateDeliveryOutcome,
 } from '../repositories/deliveries.repository.ts';
-import { getDevice, listDevices, markDeviceStatus } from '../repositories/devices.repository.ts';
+import { getDevice, listDevices, markDeviceStatus, pruneNonFcmDeviceTokens } from '../repositories/devices.repository.ts';
 import { getPreference } from '../repositories/preferences.repository.ts';
 import { getUserTimezone } from '../repositories/users.repository.ts';
 import { getNumberConfig, getSystemConfig } from '../repositories/config.repository.ts';
@@ -148,6 +148,18 @@ export class NotificationWorker {
       });
       return final ?? campaign;
     } catch (error) {
+      if (error instanceof Error && error.message === 'FIREBASE_ADMIN_NOT_CONFIGURED') {
+        const failed = await finalizeCampaign(campaign.notificationId, {
+          status: 'failed',
+          sentCount: 0,
+          failedCount: 0,
+        });
+        console.error('[FCM] Campaign failed: FIREBASE_ADMIN_NOT_CONFIGURED', {
+          notificationId: campaign.notificationId,
+          projectId: process.env.FIREBASE_PROJECT_ID || 'gen-lang-client-0566323659',
+        });
+        return failed ?? campaign;
+      }
       const maxRetries = await getNumberConfig('fcm_max_retries', 3);
       const backoffSeconds = backoffWithJitter(campaign.retryCount + 1);
       await markCampaignProcessingError(campaign.notificationId, backoffSeconds, maxRetries);
@@ -194,6 +206,13 @@ export class NotificationWorker {
    * (one per notification × device). Mirrors engine deliverToDevices.
    */
   async deliverCampaign(campaign: NotificationCampaignRecord): Promise<DeliveryOutcome> {
+    if (process.env.NODE_ENV === 'production' && !FIREBASE_ADMIN_CONFIGURED) {
+      throw new Error('FIREBASE_ADMIN_NOT_CONFIGURED');
+    }
+    if (process.env.NODE_ENV === 'production' && process.env.FCM_DRY_RUN !== 'true') {
+      const pruned = await pruneNonFcmDeviceTokens();
+      if (pruned > 0) console.warn('[FCM] Pruned non-FCM device tokens before dispatch:', pruned);
+    }
     const candidates = await this.resolveCandidates(campaign);
     const isMarketing = isMarketingTarget(campaign.targetType);
     const quietHoursEnforced =
@@ -259,8 +278,11 @@ export class NotificationWorker {
         }
       }
 
-      if (dev.fcmToken.startsWith('fcm_')) {
-        await recordReceipt(dev, 'delivered', null, `simulated:${dev.fcmToken.slice(0, 16)}`, null);
+      if (dev.fcmToken.startsWith('fcm_') || dev.fcmToken.trim().startsWith('{') || dev.fcmToken.trim().startsWith('[')) {
+        // Never manufacture a successful receipt for a demo token or a raw
+        // PushSubscription JSON blob. Production cleanup runs before lookup;
+        // this guard also protects non-production environments.
+        await recordReceipt(dev, 'failed_permanent', 'messaging/invalid-registration-token', null, null);
       } else {
         realDevices.push(dev);
       }
@@ -273,14 +295,27 @@ export class NotificationWorker {
         const response = await sendFcmMulticast(
           {
             tokens: chunk.map((d) => d.fcmToken),
-            notification: {
+            notification: { title: campaign.title, body: campaign.body },
+            data: {
+              url: campaign.deepLink || 'https://gogocompany.in/',
+              campaignId: campaign.idempotencyKey,
+              scope: campaign.targetType,
               title: campaign.title,
               body: campaign.body,
             },
             webpush: {
-              fcmOptions: {
-                link: campaign.deepLink,
+              headers: { Urgency: 'high', TTL: '86400' },
+              notification: {
+                title: campaign.title,
+                body: campaign.body,
+                icon: 'https://gogocompany.in/favicon.ico',
+                badge: 'https://gogocompany.in/favicon.ico',
+                tag: campaign.idempotencyKey,
+                renotify: true,
+                requireInteraction: true,
+                data: { url: campaign.deepLink || 'https://gogocompany.in/' },
               },
+              fcmOptions: { link: campaign.deepLink || 'https://gogocompany.in/' },
             },
           },
           process.env.FCM_DRY_RUN === 'true'
@@ -289,7 +324,13 @@ export class NotificationWorker {
           const dev = chunk[idx];
           const resp = response.responses[idx];
           if (resp.success) {
-            await recordReceipt(dev, 'delivered', null, markDryRunMessageId(resp.messageId ?? null), null);
+            const messageId = markDryRunMessageId(resp.messageId ?? null);
+            console.info('[FCM] Message accepted by Firebase:', {
+              notificationId: campaign.notificationId,
+              deviceId: dev.deviceId,
+              messageId,
+            });
+            await recordReceipt(dev, 'delivered', null, messageId, null);
           } else {
             const errorCode = extractFcmErrorCode(resp.error);
             const errorClass = classifyFcmError(errorCode);
@@ -359,11 +400,11 @@ export class NotificationWorker {
         });
         continue;
       }
-      if (device.fcmToken.startsWith('fcm_')) {
+      if (device.fcmToken.startsWith('fcm_') || device.fcmToken.trim().startsWith('{') || device.fcmToken.trim().startsWith('[')) {
         await updateDeliveryOutcome(delivery.deliveryId, {
-          status: 'delivered',
-          errorCode: null,
-          fcmMessageId: `simulated:${device.fcmToken.slice(0, 16)}`,
+          status: 'failed_permanent',
+          errorCode: 'messaging/invalid-registration-token',
+          fcmMessageId: null,
           retryCount: delivery.retryCount,
           nextAttemptAt: null,
         });
@@ -374,12 +415,37 @@ export class NotificationWorker {
           {
             tokens: [device.fcmToken],
             notification: { title: campaign.title, body: campaign.body },
-            webpush: { fcmOptions: { link: campaign.deepLink } },
+            data: {
+              url: campaign.deepLink || 'https://gogocompany.in/',
+              campaignId: campaign.idempotencyKey,
+              scope: campaign.targetType,
+              title: campaign.title,
+              body: campaign.body,
+            },
+            webpush: {
+              headers: { Urgency: 'high', TTL: '86400' },
+              notification: {
+                title: campaign.title,
+                body: campaign.body,
+                icon: 'https://gogocompany.in/favicon.ico',
+                badge: 'https://gogocompany.in/favicon.ico',
+                tag: campaign.idempotencyKey,
+                renotify: true,
+                requireInteraction: true,
+                data: { url: campaign.deepLink || 'https://gogocompany.in/' },
+              },
+              fcmOptions: { link: campaign.deepLink || 'https://gogocompany.in/' },
+            },
           },
           process.env.FCM_DRY_RUN === 'true'
         );
         const resp = response.responses[0];
         if (resp?.success) {
+          console.info('[FCM] Retry message accepted by Firebase:', {
+            notificationId,
+            deviceId: device.deviceId,
+            messageId: resp.messageId ?? null,
+          });
           await updateDeliveryOutcome(delivery.deliveryId, {
             status: 'delivered',
             errorCode: null,
