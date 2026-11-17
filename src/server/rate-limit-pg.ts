@@ -38,10 +38,18 @@ export class PostgresRateLimitStore {
     private readonly keyPrefix = ''
   ) {}
 
+  /**
+   * express-rate-limit uses this namespace when checking whether two
+   * limiter instances count the same request key. Exposing it prevents
+   * ERR_ERL_DOUBLE_COUNT false positives for our separate std/sens buckets.
+   */
+  get prefix(): string {
+    return this.keyPrefix ? `${this.keyPrefix}:` : '';
+  }
+
   private bucketKey(key: string): string {
     // Keys are short hashes already; cap defensively.
-    const namespaced = this.keyPrefix ? `${this.keyPrefix}:${key}` : key;
-    return namespaced.slice(0, 200);
+    return `${this.prefix}${key}`.slice(0, 200);
   }
 
   /** Atomic window increment: one UPSERT, race-free across instances. */

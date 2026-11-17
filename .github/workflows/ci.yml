@@ -72,6 +72,9 @@ jobs:
       - name: GitHub Actions OIDC verifier tests
         run: npm run test:oidc
 
+      - name: PostgreSQL rate-limit namespace regression tests
+        run: npm run test:rate-limit
+
       - name: PostgreSQL Integration Tests (real database, no mocks)
         env:
           SQL_HOST: 127.0.0.1
