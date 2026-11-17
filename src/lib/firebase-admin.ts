@@ -13,7 +13,6 @@
  */
 
 import { cert, initializeApp, getApps } from 'firebase-admin/app';
-import type { ServiceAccount } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
@@ -36,7 +35,7 @@ if (!getApps().length) {
       throw new Error('FIREBASE_SERVICE_ACCOUNT_PROJECT_MISMATCH');
     }
     initializeApp({
-      credential: cert(serviceAccount as ServiceAccount),
+      credential: cert(serviceAccount as Parameters<typeof cert>[0]),
       projectId: firebaseConfig.projectId,
     });
   } else {
