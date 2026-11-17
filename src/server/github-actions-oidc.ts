@@ -64,7 +64,7 @@ export async function verifyGitHubActionsOidcToken(
 
   let validSignature = false;
   try {
-    const publicKey = createPublicKey({ key: jwk as JsonWebKey, format: 'jwk' });
+    const publicKey = createPublicKey({ key: jwk as unknown as import('node:crypto').JsonWebKey, format: 'jwk' });
     validSignature = verifySignature(
       'RSA-SHA256',
       Buffer.from(parts[0] + '.' + parts[1], 'utf8'),
