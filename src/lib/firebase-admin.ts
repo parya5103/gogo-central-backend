@@ -9,23 +9,41 @@
  * to exercise the full code paths without Firebase credentials. The seam is
  * fail-closed: setting overrides in any process without GOGO_TEST_IMPORT=true
  * (test runners only) throws, so production authentication and FCM delivery
- * can never be swapped out by configuration or request input. Mocked test
- * results are always labelled MOCKED and never reported as live Firebase
- * verification (that requires GOOGLE_APPLICATION_CREDENTIALS; see README).
+ * can never be swapped out by configuration or request input.
  */
 
-import { initializeApp, getApps } from 'firebase-admin/app';
+import { cert, initializeApp, getApps } from 'firebase-admin/app';
+import type { ServiceAccount } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
 import type { MulticastMessage, BatchResponse } from 'firebase-admin/messaging';
 import fs from 'node:fs';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { parseFirebaseServiceAccount } from './firebase-credentials.ts';
+
+const firebaseServiceAccountJson =
+  process.env.FIREBASE_SERVICE_ACCOUNT_JSON ||
+  process.env.FIREBASE_SERVICE_ACCOUNT ||
+  (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim().startsWith('{')
+    ? process.env.GOOGLE_APPLICATION_CREDENTIALS
+    : '');
 
 if (!getApps().length) {
-  initializeApp({
-    projectId: firebaseConfig.projectId,
-  });
+  if (firebaseServiceAccountJson) {
+    const serviceAccount = parseFirebaseServiceAccount(firebaseServiceAccountJson);
+    if (serviceAccount.project_id !== firebaseConfig.projectId) {
+      throw new Error('FIREBASE_SERVICE_ACCOUNT_PROJECT_MISMATCH');
+    }
+    initializeApp({
+      credential: cert(serviceAccount as ServiceAccount),
+      projectId: firebaseConfig.projectId,
+    });
+  } else {
+    // Supports Render Secret Files and Google Application Default Credentials.
+    // When GOOGLE_APPLICATION_CREDENTIALS is a file path, the Admin SDK reads it.
+    initializeApp({ projectId: firebaseConfig.projectId });
+  }
 }
 
 export const adminAuth = getAuth();
@@ -35,7 +53,8 @@ export const ROOT_ADMIN_EMAIL = 'aaryapratik@gmail.com';
 
 /**
  * TEST-ONLY overrides (guarded by GOGO_TEST_IMPORT). Never settable in
- * production processes; the setter throws outside test runners.
+ * production processes; the setter throws, so production authentication and
+ * FCM delivery can never be swapped out by configuration or request input.
  */
 export interface TestFirebaseOverrides {
   verifyIdToken?: (idToken: string, checkRevoked: boolean) => Promise<unknown>;
@@ -44,11 +63,6 @@ export interface TestFirebaseOverrides {
 
 let testOverrides: TestFirebaseOverrides = {};
 
-/**
- * Replaces the Firebase fakes used by the test suites. Fail-closed: throws
- * unless GOGO_TEST_IMPORT=true (set only by npm test / npm run test:pg).
- * Passing {} clears all overrides and restores real Admin SDK behaviour.
- */
 export function setTestFirebaseOverrides(overrides: TestFirebaseOverrides): void {
   if (process.env.GOGO_TEST_IMPORT !== 'true') {
     throw new Error(
@@ -58,11 +72,6 @@ export function setTestFirebaseOverrides(overrides: TestFirebaseOverrides): void
   testOverrides = overrides;
 }
 
-/**
- * Verifies a Firebase ID token. Production path: the real Admin SDK with
- * checkRevoked enforcement. Test path (only under GOGO_TEST_IMPORT): the
- * injected fake with the same call contract.
- */
 export async function verifyFirebaseIdToken(
   idToken: string,
   checkRevoked: boolean
@@ -73,10 +82,6 @@ export async function verifyFirebaseIdToken(
   return adminAuth.verifyIdToken(idToken, checkRevoked);
 }
 
-/**
- * Sends an FCM multicast (optionally dry-run). Production path: the real
- * Admin SDK. Test path (only under GOGO_TEST_IMPORT): the injected fake.
- */
 export async function sendFcmMulticast(
   message: MulticastMessage,
   dryRun: boolean
@@ -89,21 +94,34 @@ export async function sendFcmMulticast(
 
 /**
  * Public, unauthenticated Firebase Admin runtime diagnostics.
- *
- * Purpose: while server-side token verification is misconfigured (missing
- * service-account credentials, wrong project audience), the admin dashboard
- * cannot authenticate, so the failure is invisible to its own health panel.
- * This self-check answers "is the server able to verify ID tokens, and if
- * not, exactly why" WITHOUT exposing any secret: only booleans, the public
- * project identifiers (already present in the shipped client config), and
- * the raw error CODE of a deliberately failing live probe.
+ * Exposes configuration state and public project IDs only, never credential
+ * contents, private keys, client secrets, or full filesystem paths.
  */
 export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>> {
-  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
+  const googleCredentialsValue = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
+  const serviceAccountJson =
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON ||
+    process.env.FIREBASE_SERVICE_ACCOUNT ||
+    (googleCredentialsValue.trim().startsWith('{') ? googleCredentialsValue : '');
+  const credentialsPath = serviceAccountJson ? '' : googleCredentialsValue;
 
+  let credentialSource = serviceAccountJson
+    ? 'service-account-json-env'
+    : credentialsPath
+      ? 'google-application-credentials-file'
+      : 'application-default-credentials';
   let credentialFileState = 'env-not-set';
   let credentialProjectId: string | null = null;
-  if (credentialsPath) {
+
+  if (serviceAccountJson) {
+    try {
+      const account = parseFirebaseServiceAccount(serviceAccountJson);
+      credentialProjectId = account.project_id;
+      credentialFileState = 'parsed-env-json';
+    } catch {
+      credentialFileState = 'invalid-env-json';
+    }
+  } else if (credentialsPath) {
     try {
       const credJson = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8')) as Record<
         string,
@@ -113,17 +131,10 @@ export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>
         typeof credJson.project_id === 'string' ? credJson.project_id : null;
       credentialFileState = credentialProjectId ? 'parsed' : 'parsed-no-project-id';
     } catch {
-      try {
-        credentialFileState = fs.existsSync(credentialsPath) ? 'exists-not-json' : 'missing';
-      } catch {
-        credentialFileState = 'unreadable';
-      }
+      credentialFileState = fs.existsSync(credentialsPath) ? 'exists-not-json' : 'missing';
     }
   }
 
-  // Live probe exercising the FULL credential chain end-to-end. Healthy
-  // credentials always yield auth/user-not-found for a nonexistent UID;
-  // any other code pinpoints the exact server-side config failure.
   let liveProbeErrorCode: string | null = null;
   let liveProbeErrorDetail: string | null = null;
   try {
@@ -137,7 +148,8 @@ export async function adminRuntimeDiagnostics(): Promise<Record<string, unknown>
 
   return {
     adminAppInitialized: getApps().length > 0,
-    credentialsEnvSet: Boolean(credentialsPath),
+    credentialsEnvSet: Boolean(serviceAccountJson || credentialsPath),
+    credentialSource,
     credentialFileState,
     credentialProjectId,
     expectedProjectId: firebaseConfig.projectId,
