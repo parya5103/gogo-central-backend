@@ -30,7 +30,7 @@ import firebaseConfig from '../../firebase-applet-config.json';
  * JSON belonging to this exact Firebase project. Never read arbitrary repo files.
  */
 type ResolvedServiceAccount = {
-  credential: Parameters<typeof cert>[0];
+  credential: ReturnType<typeof cert>;
   projectId: string;
   source: 'env-path' | 'render-secret-file';
 };
@@ -51,7 +51,7 @@ function readServiceAccountFile(filePath: string): ResolvedServiceAccount | null
       return null;
     }
     return {
-      credential: cert(parsed as Parameters<typeof cert>[0] extends string ? never : object as Parameters<typeof cert>[0]),
+      credential: cert({ projectId, clientEmail, privateKey }),
       projectId,
       source: process.env.GOOGLE_APPLICATION_CREDENTIALS ? 'env-path' : 'render-secret-file',
     };
