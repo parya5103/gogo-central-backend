@@ -55,3 +55,57 @@
 - **PostgreSQL Never Replaced by Firestore**: PostgreSQL (`migrations/001_initial_schema.sql`) remains the central backend relational schema for all 10 domain tables; Firestore is preserved strictly for existing client-side game saves and AI Studio auth integration.
 - **Provider-Independent Adapter (`src/db/postgres-config.ts`)**: Supports `PG_PROVIDER=local` (Docker Compose `postgres:18-alpine` or native Termux `postgresql`), `PG_PROVIDER=neon` (Neon ₹0 Free Tier with TLS pooling), and `PG_PROVIDER=cloudsql` (Google Cloud SQL Unix socket or Private IP).
 - **Android / Termux Workflow**: Because unrooted Android kernels lack `cgroups` and namespace mounts required by `dockerd`, developers on Android can run the entire stack natively in Termux (`pkg install nodejs-lts postgresql`) with `npm run db:verify`, `npm run db:backup`, `npm run db:restore`, and `npm run dev` at ₹0 cost.
+
+## Deployment and integration status 2026-11-09 to 2026-11-17 (supersedes section 0 where they conflict)
+
+This section records the verified live state after the 2026-11-08 master audit; run-state facts
+below were verified from deployed URLs, workflow runs and merged PR evidence at those dates.
+
+- LIVE DEPLOYMENT: the backend runs on Render (Docker runtime, Singapore region) at
+  https://gogo-central-backend-mg6z.onrender.com. /api/v1/health/live and /api/v1/health/ready
+  verified OK (ready reports database connected) on 2026-11-09. PostgreSQL is Neon
+  (org org-falling-pond-61172125, project rapid-flower-44795642, branch production);
+  migrations auto-apply on boot. Render env includes FCM_DRY_RUN,
+  CORS_ALLOWED_ORIGINS (gogocompany.in, www.gogocompany.in, parya5103.github.io) and the
+  Firebase service-account JSON as a Render Secret File mounted at
+  /etc/secrets/firebase-service-account.json. Expect ~30-60s cold starts on the free tier.
+- ALL 5 PRODUCT SITES WIRED (2026-11-09 pushes): gogo-website (d3fe054), Sarkari-Sarthi
+  (733829d), PikaNews (d2a6e6f), Fletch_Game (b96e582), crystal-quest-web (f566335). Each
+  ships a gogo-notifications module with apiBase + Web Push VAPID filled and a rewritten
+  fail-closed config-gate test. CI verified green on each (CQ has no CI; syntax-verified only).
+- ADMIN DASHBOARD: React SPA (src/App.tsx built with Vite) served at the service root with
+  Google sign-in. Sign-in chain fixed across PRs #7 (signInWithRedirect for Android Chrome),
+  #8 (same-origin /__/auth/* proxy to the Firebase authDomain + client authDomain = current
+  hostname), #9 (auth-race gating + stale error banner cleared), #10 (ensureApiAccess() guard
+  on ALL action call sites), #13 (token acquisition split from the optional Firestore profile
+  sync so a rules denial can no longer wipe a valid token). GCP OAuth redirect URI
+  .../__/auth/handler configured by the owner. Sign-in confirmed working end to end
+  (2026-11-10, user confirmation).
+- SERVICE ACCOUNT ROOT CAUSE FIXED (2026-11-12): the deployed Render service account was
+  from the wrong Firebase project; diagnosed via the public unauthenticated
+  /api/v1/health/firebase admin diagnostics endpoint (PR #12: reports credential state,
+  project-id match, a live auth probe code and the FCM_DRY_RUN value; never returns secrets).
+  After the owner replaced the secret: projectIdMatches true, probe returns auth/user-not-found
+  (healthy), fcmDryRun false. Token verification WORKS in production since then.
+- FCM DELIVERY CORRECTNESS (PR #27 render-credential load, PR #31 truthful delivery receipts
+  and dry-run accounting): the delivery pipeline now reports honest receipts and dry-run
+  bookkeeping; verified merged 2026-11-17.
+- AUTOMATION DISPATCH: gogo-website calls POST /api/v1/automation/publish with a GitHub
+  Actions OIDC token (audience gogo-central-notifications) after successful product sync to
+  trigger product-update notifications; commits 0e105794 (centralize automatic dispatch via
+  GitHub OIDC), f4d6ee38 (rate-limit store namespace) and e27eef9e (persist automation
+  principal) landed 2026-11-17. verifyNoAuthOnHealth: the health/diagnostics endpoints remain
+  unauthenticated by design and leak no secrets.
+- 2026-11-10 to 2026-11-14 hardening rounds merged: OpenAPI 3.1 at /api/v1/openapi.json (#24,
+  rebranch of #17), campaign cancellation (#14+ era, 003 migration), request-id middleware,
+  SPA CSP handling (finalhandler 404-CSP lesson is in ARCHITECTURE docs), overview
+  parallelization, failed-deliveries admin endpoint, docs PRs #22/#23, deployment safety gate.
+
+### Still outstanding (honest)
+
+- Real-device delivery proof: a device must opt in on a live site, the owner must confirm the
+  device row, a dry-run send produces dryrun:-prefixed receipt IDs, FCM_DRY_RUN must be false
+  for real sends. Repo/CI tests remain mocked; only receipts are delivery evidence.
+- Firestore rules still deny users/{uid} writes (non-fatal, cosmetic profile sync only).
+- The Neon preview-branch workflow (neon_workflow.yml) uses floating action tags, unlike the
+  SHA-pinned ci.yml.
